@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "compare-gui"
+name = "GenCompare"
 path = "src/main.rs"
 
 [build-dependencies]

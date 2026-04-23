@@ -49,7 +49,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item target/release/compare-gui.exe dist/GenCompare-portable.exe
+          Copy-Item target/release/GenCompare.exe dist/GenCompare-portable.exe
 
       - name: Collect installer artifacts
         shell: pwsh

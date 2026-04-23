@@ -141,6 +141,8 @@ function renderPairs() {
       li.dataset.path = f;
       li.addEventListener('dragstart', (e) => {
         e.dataTransfer.setData('application/compare-unpaired', f);
+        // text/plain fallback — some webviews only pass through plain MIME.
+        e.dataTransfer.setData('text/plain', 'UNPAIRED:' + f);
         e.dataTransfer.effectAllowed = 'copyMove';
         li.classList.add('dragging');
       });
@@ -183,16 +185,20 @@ function renderPairs() {
       cell.addEventListener('dragstart', (e) => {
         const idx = cell.dataset.idx;
         const side = cell.dataset.side;
-        e.dataTransfer.setData('application/compare-cell', JSON.stringify({ idx, side }));
+        const payload = JSON.stringify({ idx, side });
+        e.dataTransfer.setData('application/compare-cell', payload);
+        // text/plain fallback — some webviews only pass through plain MIME.
+        e.dataTransfer.setData('text/plain', 'CELL:' + payload);
         e.dataTransfer.effectAllowed = 'copyMove';
         cell.classList.add('dragging');
       });
       cell.addEventListener('dragend', () => cell.classList.remove('dragging'));
     }
     cell.addEventListener('dragover', (e) => {
-      const types = e.dataTransfer.types;
-      if (!types.includes('application/compare-cell') &&
-          !types.includes('application/compare-unpaired')) return;
+      // WebView2 hides custom MIME types during dragover for security, so we
+      // can't filter by types here. We rely on the drop handler to validate.
+      // Only skip if the drag looks like an OS file drop (Tauri handles those).
+      if (e.dataTransfer.types.includes('Files')) return;
       e.preventDefault();
       e.dataTransfer.dropEffect = e.ctrlKey ? 'copy' : 'move';
       cell.classList.add('drop-target');
@@ -204,8 +210,16 @@ function renderPairs() {
       const dstSide = cell.dataset.side;
       const isCopy = e.ctrlKey;
 
+      // Read payload — try custom MIME first, then text/plain fallback.
+      let unpairedPath = e.dataTransfer.getData('application/compare-unpaired');
+      let cellPayload = e.dataTransfer.getData('application/compare-cell');
+      if (!unpairedPath && !cellPayload) {
+        const plain = e.dataTransfer.getData('text/plain') || '';
+        if (plain.startsWith('UNPAIRED:')) unpairedPath = plain.slice(9);
+        else if (plain.startsWith('CELL:'))  cellPayload  = plain.slice(5);
+      }
+
       // Case 1: dropping from unpaired list.
-      const unpairedPath = e.dataTransfer.getData('application/compare-unpaired');
       if (unpairedPath) {
         e.preventDefault();
         currentPairs[dstIdx][dstSide] = unpairedPath;
@@ -224,10 +238,9 @@ function renderPairs() {
       }
 
       // Case 2: dropping from another cell.
-      const raw = e.dataTransfer.getData('application/compare-cell');
-      if (!raw) return;
+      if (!cellPayload) return;
       e.preventDefault();
-      const { idx: srcIdxStr, side: srcSide } = JSON.parse(raw);
+      const { idx: srcIdxStr, side: srcSide } = JSON.parse(cellPayload);
       const srcIdx = parseInt(srcIdxStr, 10);
       if (srcIdx === dstIdx && srcSide === dstSide) return;
       const srcFile = currentPairs[srcIdx][srcSide];
