@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Gen Compare — 문서 비교</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="stylesheet" href="style.css" />
+    <style>
+      /* Compact two-zone quick input (initial state).
+         When several files are dropped, auto-pair detection takes over. */
+      .quick-pair {
+        display: grid;
+        grid-template-columns: 1fr auto 1fr auto;
+        grid-template-areas: "old arrow new btn" "hint hint hint hint";
+        gap: 10px 14px;
+        align-items: center;
+        padding: 14px 16px;
+        border: 2px dashed #c5cfe0;
+        border-radius: 10px;
+        background: #f7f9fc;
+        transition: border-color 160ms, background 160ms;
+      }
+      .quick-pair.dragover { border-color: #3a7bd5; background: #eef4ff; }
+      .quick-zone {
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        min-height: 54px;
+        padding: 8px 12px;
+        border: 1px solid #d8dfeb;
+        border-radius: 8px;
+        background: #fff;
+        cursor: pointer;
+      }
+      .quick-zone:hover { border-color: #9fb1d0; }
+      .quick-zone.filled { border-color: #3a7bd5; background: #f1f6ff; }
+      .quick-zone[data-side="old"] { grid-area: old; }
+      .quick-zone[data-side="new"] { grid-area: new; }
+      .quick-arrow { grid-area: arrow; color: #8a94a6; font-size: 18px; }
+      #quick-add-btn { grid-area: btn; }
+      .quick-hint { grid-area: hint; font-size: 12px; }
+      .quick-label { font-size: 11px; color: #6b7686; letter-spacing: 0.02em; }
+      .quick-file { font-size: 13px; color: #1a2537; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .quick-file.muted { color: #9aa4b5; }
+
+      /* Ensure at least 4 pair rows are visible without scroll. */
+      #pairs-section .table-wrap { min-height: 200px; }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <header class="app-header">
+        <div class="brand">
+          <div class="brand-mark">◎</div>
+          <div class="brand-text">
+            <h1>Gen Compare</h1>
+            <p class="tagline">문서 비교 · 병렬 배치 · 헤드리스</p>
+          </div>
+        </div>
+        <button id="settings-btn" class="icon-btn" title="설정">⚙</button>
+      </header>
+
+      <main class="app-main">
+        <!-- Initial compact 2-zone quick input. Drop 1 file to fill a zone;
+             drop 2 to auto-add as a pair; drop 3+ to trigger auto-detection. -->
+        <section id="quick-pair" class="quick-pair" aria-label="빠른 짝 입력">
+          <div class="quick-zone" id="quick-old" data-side="old">
+            <div class="quick-label">원본 (Old)</div>
+            <div class="quick-file muted">여기에 원본 끌어놓기</div>
+          </div>
+          <div class="quick-arrow">→</div>
+          <div class="quick-zone" id="quick-new" data-side="new">
+            <div class="quick-label">수정 (New)</div>
+            <div class="quick-file muted">여기에 수정본 끌어놓기</div>
+          </div>
+          <button id="quick-add-btn" class="btn btn-primary btn-sm" disabled>짝 추가</button>
+          <div class="quick-hint muted">
+            여러 파일을 한꺼번에 놓으면 자동 매칭 모드로 전환됩니다 ·
+            <button id="browse-folder-btn" class="btn-link">폴더 선택…</button>
+          </div>
+        </section>
+
+        <!-- STEP 2: Pair list (matched + unpaired together) -->
+        <section id="pairs-section" class="card hidden">
+          <div class="card-header">
+            <h2>① 원본 · 수정본 짝</h2>
+            <span id="pairs-summary" class="muted"></span>
+            <button id="clear-btn" class="btn btn-ghost btn-sm">초기화</button>
+          </div>
+          <div class="table-wrap">
+            <table id="pairs-table">
+              <thead>
+                <tr>
+                  <th>원본 (Old)</th>
+                  <th></th>
+                  <th>수정 (New)</th>
+                  <th class="reason-col">근거</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+            <div class="table-hint muted">셀을 드래그해 짝 재배치 · <b>Ctrl</b> 누른 채 드래그하면 복사 · <b>⇄</b> 클릭으로 원본·수정본 교체</div>
+          </div>
+
+          <div id="unpaired" class="unpaired hidden">
+            <div class="unpaired-header">
+              <span class="unpaired-title">⚠ 짝을 못 찾은 파일</span>
+              <span class="unpaired-hint">아래에서 원본·수정본을 골라 직접 짝으로 추가할 수 있습니다.</span>
+            </div>
+            <ul></ul>
+            <div class="add-pair-row">
+              <label>원본: <select id="add-pair-old"></select></label>
+              <span class="add-pair-arrow">→</span>
+              <label>수정: <select id="add-pair-new"></select></label>
+              <button id="add-pair-btn" class="btn btn-secondary btn-sm">짝 추가</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- STEP 3: Options -->
+        <section id="options-section" class="card hidden">
+          <div class="card-header"><h2>② 저장 형식</h2><span class="muted">중복 선택 가능</span></div>
+          <div class="output-buttons">
+            <label class="output-btn">
+              <input type="checkbox" id="out-word" checked />
+              <div class="output-btn-inner">
+                <div class="output-badge" style="background: linear-gradient(135deg,#0b5bd3,#3a7bd5)">W</div>
+                <div class="output-info">
+                  <div class="output-title">워드</div>
+                </div>
+              </div>
+            </label>
+            <label class="output-btn">
+              <input type="checkbox" id="out-track" />
+              <div class="output-btn-inner">
+                <div class="output-badge" style="background: linear-gradient(135deg,#2e7d32,#4fa353)">T</div>
+                <div class="output-info">
+                  <div class="output-title">Track Change</div>
+                </div>
+              </div>
+            </label>
+            <label class="output-btn">
+              <input type="checkbox" id="out-pdf" />
+              <div class="output-btn-inner">
+                <div class="output-badge" style="background: linear-gradient(135deg,#c62828,#e54848)">P</div>
+                <div class="output-info">
+                  <div class="output-title">PDF</div>
+                </div>
+              </div>
+            </label>
+            <label class="output-btn">
+              <input type="checkbox" id="out-cpo" />
+              <div class="output-btn-inner">
+                <div class="output-badge" style="background: linear-gradient(135deg,#6a1b9a,#9a4dcc)">C</div>
+                <div class="output-info">
+                  <div class="output-title">CPO</div>
+                  <div class="output-desc">변경된 부분만 PDF</div>
+                </div>
+              </div>
+            </label>
+          </div>
+
+          <div class="run-row">
+            <div class="out-dir-info">
+              저장 위치: <span id="out-dir-display" class="muted"></span>
+              <button id="change-dir-btn" class="btn btn-ghost btn-sm">변경</button>
+            </div>
+            <button id="run-btn" class="btn btn-primary btn-lg">
+              <span class="btn-text">비교 시작</span>
+              <span class="btn-spinner hidden"></span>
+            </button>
+          </div>
+        </section>
+
+        <!-- STEP 4: Results -->
+        <section id="results-section" class="card hidden">
+          <div class="card-header">
+            <h2>③ 결과</h2>
+            <span id="results-summary" class="muted"></span>
+            <button id="open-out-dir-btn" class="btn btn-ghost btn-sm">출력 폴더 열기</button>
+          </div>
+          <div id="results-list"></div>
+        </section>
+      </main>
+
+      <!-- Progress overlay -->
+      <div id="progress-overlay" class="progress-overlay hidden">
+        <div class="progress-card">
+          <div class="progress-spinner"></div>
+          <div id="progress-title" class="progress-title">비교 진행 중…</div>
+          <div id="progress-detail" class="progress-detail muted">파일을 읽고 있습니다</div>
+        </div>
+      </div>
+
+      <!-- Settings modal -->
+      <div id="settings-modal" class="modal hidden">
+        <div class="modal-backdrop" data-close></div>
+        <div class="modal-content">
+          <div class="modal-header">
+            <h3>설정</h3>
+            <button class="icon-btn" data-close>✕</button>
+          </div>
+          <div class="modal-body">
+            <label class="field">
+              <span class="field-label">수정자 이름 (Track Change 전용)</span>
+              <input type="text" id="settings-author" placeholder="(비우면 파일 수정자 사용)" />
+              <span class="field-hint">Track Change의 작성자(Reviewer)로만 기록됩니다. 비우면 파일의 수정자(lastModifiedBy)가 사용됩니다.</span>
+            </label>
+            <label class="field">
+              <span class="field-label">기본 저장 형식</span>
+              <div class="checkbox-row">
+                <label><input type="checkbox" id="settings-out-word" checked /> 워드</label>
+                <label><input type="checkbox" id="settings-out-track" /> Track Change</label>
+                <label><input type="checkbox" id="settings-out-pdf" /> PDF</label>
+                <label><input type="checkbox" id="settings-out-cpo" /> CPO</label>
+              </div>
+            </label>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-ghost" data-close>취소</button>
+            <button id="settings-save" class="btn btn-primary">저장</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Toast container -->
+      <div id="toasts" class="toasts" aria-live="polite"></div>
+    </div>
+
+    <script type="module" src="main.js"></script>
+  </body>
+</html>

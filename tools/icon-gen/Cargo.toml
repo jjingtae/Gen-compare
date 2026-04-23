@@ -1,0 +1,18 @@
+# Standalone — not part of the main workspace.
+[workspace]
+
+[package]
+name = "icon-gen"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "icon-gen"
+path = "src/main.rs"
+
+[dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+ico = "0.4"
+anyhow = "1"
+resvg = "0.44"

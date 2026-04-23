@@ -1,0 +1,17 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "identifier": "default",
+  "description": "기본 권한 — 파일 드래그·드롭, 다이얼로그, 이벤트 수신",
+  "local": true,
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "core:window:default",
+    "core:webview:default",
+    "core:path:default",
+    "core:app:default",
+    "dialog:default",
+    "fs:default"
+  ]
+}

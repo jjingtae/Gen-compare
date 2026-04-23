@@ -1,0 +1,39 @@
+# Rust build artifacts (per-crate target dirs too)
+/target/
+**/target/
+Cargo.lock.bak
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Tauri auto-generated
+crates/gui/gen/
+
+# Large icon source (committed icon set lives in icons/*.png|.ico)
+crates/gui/icons/icon_source.png
+
+# Bulk test fixtures — keep out of git (can be multi-MB DOCX).
+/fixtures/
+
+# User DOCX outputs — never commit generated redlines.
+*.docx
+!crates/**/*.docx
+/redlines/
+/**/redlines/
+
+# Scratch
+*.pdf.bak
+*.tmp
+*.log
+
+# Local env
+.env
+.env.local
+
+# Claude Code local settings (contains machine-specific paths)
+.claude/

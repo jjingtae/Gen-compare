@@ -1,0 +1,69 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/docx",
+    "crates/cli",
+    "crates/gui",
+]
+# GUI excluded from default build — its Tauri deps are large, build explicitly
+# with `cargo build -p compare-gui` when needed.
+default-members = [
+    "crates/core",
+    "crates/docx",
+    "crates/cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT"
+
+[workspace.dependencies]
+# Diff engine
+similar = { version = "2.6", features = ["unicode"] }
+
+# DOCX (zip + xml)
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
+quick-xml = { version = "0.37", features = ["serialize"] }
+
+# Error handling
+anyhow = "1.0"
+thiserror = "2.0"
+
+# Parallelism (for future batch compare)
+rayon = "1.10"
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+
+# Serde
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Regex (filename pair detection)
+regex = "1.11"
+once_cell = "1.20"
+
+# Date formatting for track-change timestamps
+time = { version = "0.3", features = ["formatting", "local-offset"] }
+
+# PDF page extraction (CPO output)
+lopdf = "0.34"
+
+# Tauri (GUI crate only)
+tauri = { version = "2", features = [] }
+tauri-build = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+
+# Internal crates
+compare-core = { path = "crates/core" }
+compare-docx = { path = "crates/docx" }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
