@@ -108,11 +108,17 @@ function renderPairs() {
     const p = currentPairs[i];
     const row = document.createElement('tr');
     row.dataset.idx = i;
+    const oldCell = p.old
+      ? `<td class="filename drop-cell" data-idx="${i}" data-side="old" draggable="true" title="${p.old}">${basename(p.old)}</td>`
+      : `<td class="filename drop-cell empty-slot" data-idx="${i}" data-side="old">＋ 원본을 여기에 끌어놓기</td>`;
+    const newCell = p.new
+      ? `<td class="filename drop-cell" data-idx="${i}" data-side="new" draggable="true" title="${p.new}">${basename(p.new)}</td>`
+      : `<td class="filename drop-cell empty-slot" data-idx="${i}" data-side="new">＋ 수정본을 여기에 끌어놓기</td>`;
     row.innerHTML = `
-      <td class="filename drop-cell" data-idx="${i}" data-side="old" draggable="true" title="${p.old}">${basename(p.old)}</td>
+      ${oldCell}
       <td class="arrow-swap"><button class="swap-btn" data-idx="${i}" title="원본·수정본 교체">⇄</button></td>
-      <td class="filename drop-cell" data-idx="${i}" data-side="new" draggable="true" title="${p.new}">${basename(p.new)}</td>
-      <td class="reason-col">${p.reason}</td>
+      ${newCell}
+      <td class="reason-col">${p.reason || ''}</td>
       <td><button class="remove-pair-btn" data-idx="${i}" title="이 짝 제외">✕</button></td>
     `;
     tbody.appendChild(row);
@@ -128,36 +134,31 @@ function renderPairs() {
     up.classList.remove('hidden');
     for (const f of currentUnpaired) {
       const li = document.createElement('li');
-      li.textContent = basename(f);
+      li.className = 'unpaired-item';
+      li.textContent = '📄 ' + basename(f);
       li.title = f;
+      li.draggable = true;
+      li.dataset.path = f;
+      li.addEventListener('dragstart', (e) => {
+        e.dataTransfer.setData('application/compare-unpaired', f);
+        e.dataTransfer.effectAllowed = 'copyMove';
+        li.classList.add('dragging');
+      });
+      li.addEventListener('dragend', () => li.classList.remove('dragging'));
       ul.appendChild(li);
     }
-    // Populate the manual add-pair dropdowns.
-    const oldSel = $('add-pair-old');
-    const newSel = $('add-pair-new');
-    oldSel.innerHTML = '';
-    newSel.innerHTML = '';
-    for (const f of currentUnpaired) {
-      const opt1 = document.createElement('option');
-      opt1.value = f; opt1.textContent = basename(f);
-      oldSel.appendChild(opt1);
-      const opt2 = document.createElement('option');
-      opt2.value = f; opt2.textContent = basename(f);
-      newSel.appendChild(opt2);
-    }
-    // Pre-select different items if possible.
-    if (currentUnpaired.length >= 2) newSel.selectedIndex = 1;
-    $('add-pair-btn').disabled = currentUnpaired.length < 2;
   } else {
     up.classList.add('hidden');
   }
 
-  // Remove-pair handlers
+  // Remove-pair handlers — push non-null files back to the unpaired list.
   tbody.querySelectorAll('.remove-pair-btn').forEach((btn) => {
     btn.addEventListener('click', () => {
       const idx = parseInt(btn.dataset.idx, 10);
       const removed = currentPairs.splice(idx, 1)[0];
-      currentUnpaired.push(removed.old, removed.new);
+      for (const f of [removed.old, removed.new]) {
+        if (f && !currentUnpaired.includes(f)) currentUnpaired.push(f);
+      }
       renderPairs();
     });
   });
@@ -174,19 +175,24 @@ function renderPairs() {
 
   // Cell-level drag & drop:
   //   - drag a filename cell onto another cell to move it there
-  //   - hold Ctrl while dragging to copy (the source keeps its file)
+  //   - drag an unpaired list item onto a cell to assign it
+  //   - hold Ctrl while dragging to copy (source keeps its file)
   tbody.querySelectorAll('.drop-cell').forEach((cell) => {
-    cell.addEventListener('dragstart', (e) => {
-      const idx = cell.dataset.idx;
-      const side = cell.dataset.side;
-      e.dataTransfer.setData('application/compare-cell', JSON.stringify({ idx, side }));
-      // Effects: allow both move and copy; final mode determined by Ctrl key.
-      e.dataTransfer.effectAllowed = 'copyMove';
-      cell.classList.add('dragging');
-    });
-    cell.addEventListener('dragend', () => cell.classList.remove('dragging'));
+    // Only filled cells are source-draggable (empty placeholders are not).
+    if (!cell.classList.contains('empty-slot')) {
+      cell.addEventListener('dragstart', (e) => {
+        const idx = cell.dataset.idx;
+        const side = cell.dataset.side;
+        e.dataTransfer.setData('application/compare-cell', JSON.stringify({ idx, side }));
+        e.dataTransfer.effectAllowed = 'copyMove';
+        cell.classList.add('dragging');
+      });
+      cell.addEventListener('dragend', () => cell.classList.remove('dragging'));
+    }
     cell.addEventListener('dragover', (e) => {
-      if (!e.dataTransfer.types.includes('application/compare-cell')) return;
+      const types = e.dataTransfer.types;
+      if (!types.includes('application/compare-cell') &&
+          !types.includes('application/compare-unpaired')) return;
       e.preventDefault();
       e.dataTransfer.dropEffect = e.ctrlKey ? 'copy' : 'move';
       cell.classList.add('drop-target');
@@ -194,22 +200,41 @@ function renderPairs() {
     cell.addEventListener('dragleave', () => cell.classList.remove('drop-target'));
     cell.addEventListener('drop', (e) => {
       cell.classList.remove('drop-target');
+      const dstIdx = parseInt(cell.dataset.idx, 10);
+      const dstSide = cell.dataset.side;
+      const isCopy = e.ctrlKey;
+
+      // Case 1: dropping from unpaired list.
+      const unpairedPath = e.dataTransfer.getData('application/compare-unpaired');
+      if (unpairedPath) {
+        e.preventDefault();
+        currentPairs[dstIdx][dstSide] = unpairedPath;
+        // Auto-derive base name from the old side if not yet set.
+        if (!currentPairs[dstIdx].base) {
+          const src = currentPairs[dstIdx].old || currentPairs[dstIdx].new;
+          if (src) currentPairs[dstIdx].base = basename(src).replace(/\.[^.]+$/, '');
+        }
+        if (!isCopy) {
+          // Move: remove from unpaired list.
+          currentUnpaired = currentUnpaired.filter((f) => f !== unpairedPath);
+        }
+        renderPairs();
+        if (currentPairs.some((p) => p.old && p.new)) show('options-section');
+        return;
+      }
+
+      // Case 2: dropping from another cell.
       const raw = e.dataTransfer.getData('application/compare-cell');
       if (!raw) return;
       e.preventDefault();
       const { idx: srcIdxStr, side: srcSide } = JSON.parse(raw);
       const srcIdx = parseInt(srcIdxStr, 10);
-      const dstIdx = parseInt(cell.dataset.idx, 10);
-      const dstSide = cell.dataset.side;
       if (srcIdx === dstIdx && srcSide === dstSide) return;
       const srcFile = currentPairs[srcIdx][srcSide];
       const dstFile = currentPairs[dstIdx][dstSide];
-      const isCopy = e.ctrlKey;
       if (isCopy) {
-        // Copy: destination takes src's file, source is unchanged.
         currentPairs[dstIdx][dstSide] = srcFile;
       } else {
-        // Move: swap the two cells.
         currentPairs[dstIdx][dstSide] = srcFile;
         currentPairs[srcIdx][srcSide] = dstFile;
       }
@@ -304,9 +329,17 @@ async function runAll() {
     toast('비교할 짝이 없습니다.', 'warning');
     return;
   }
+  const filledPairs = currentPairs.filter((p) => p.old && p.new);
+  if (!filledPairs.length) {
+    toast('원본·수정본이 모두 채워진 짝이 없습니다.', 'warning');
+    return;
+  }
+  if (filledPairs.length < currentPairs.length) {
+    toast(`${currentPairs.length - filledPairs.length}개의 빈 짝은 건너뜁니다.`, 'warning');
+  }
 
   const author = settings.author.trim() || null;
-  const runPairs = currentPairs.map((p, i) => ({
+  const runPairs = filledPairs.map((p, i) => ({
     old: p.old,
     new: p.new,
     out_base: `${p.base || 'pair'}_${i + 1}`,
@@ -517,19 +550,12 @@ $('change-dir-btn').addEventListener('click', async () => {
   updateOutDirDisplay();
 });
 
-$('add-pair-btn').addEventListener('click', () => {
-  const oldPath = $('add-pair-old').value;
-  const newPath = $('add-pair-new').value;
-  if (!oldPath || !newPath) return;
-  if (oldPath === newPath) {
-    toast('원본과 수정본은 서로 달라야 합니다.', 'warning');
-    return;
-  }
-  const base = basename(oldPath).replace(/\.[^.]+$/, '');
-  currentPairs.push({ old: oldPath, new: newPath, base, reason: '수동 추가' });
-  currentUnpaired = currentUnpaired.filter((f) => f !== oldPath && f !== newPath);
+// "＋ 짝 추가" in the pairs card header — appends an empty row so the user
+// can drag-drop an unpaired file into each slot.
+$('add-empty-pair-btn').addEventListener('click', () => {
+  currentPairs.push({ old: null, new: null, base: '', reason: '직접 지정' });
+  show('pairs-section');
   renderPairs();
-  show('options-section');
 });
 
 $('clear-btn').addEventListener('click', () => {

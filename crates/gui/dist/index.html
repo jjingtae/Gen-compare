@@ -130,6 +130,7 @@
           <div class="card-header">
             <h2>① 원본 · 수정본 짝</h2>
             <span id="pairs-summary" class="muted"></span>
+            <button id="add-empty-pair-btn" class="btn btn-secondary btn-sm">＋ 짝 추가</button>
             <button id="clear-btn" class="btn btn-ghost btn-sm">초기화</button>
           </div>
           <div class="table-wrap">
@@ -145,21 +146,15 @@
               </thead>
               <tbody></tbody>
             </table>
-            <div class="table-hint muted">셀을 드래그해 짝 재배치 · <b>Ctrl</b> 누른 채 드래그하면 복사 · <b>⇄</b> 클릭으로 원본·수정본 교체</div>
+            <div class="table-hint muted">셀을 드래그해 짝 재배치 · <b>Ctrl</b> 누른 채 드래그하면 복사 · <b>⇄</b> 클릭으로 원본·수정본 교체 · <b>＋ 짝 추가</b>로 빈 행을 만들어 미매칭 파일을 끌어다 놓기</div>
           </div>
 
           <div id="unpaired" class="unpaired hidden">
             <div class="unpaired-header">
-              <span class="unpaired-title">⚠ 짝을 못 찾은 파일</span>
-              <span class="unpaired-hint">아래에서 원본·수정본을 골라 직접 짝으로 추가할 수 있습니다.</span>
+              <span class="unpaired-title">⚠ 미매칭 파일</span>
+              <span class="unpaired-hint">아래 파일을 위 표의 빈 칸으로 끌어다 놓으세요. <b>Ctrl+드래그</b>면 복사됩니다.</span>
             </div>
             <ul></ul>
-            <div class="add-pair-row">
-              <label>원본: <select id="add-pair-old"></select></label>
-              <span class="add-pair-arrow">→</span>
-              <label>수정: <select id="add-pair-new"></select></label>
-              <button id="add-pair-btn" class="btn btn-secondary btn-sm">짝 추가</button>
-            </div>
           </div>
         </section>
 
