@@ -109,10 +109,10 @@ function renderPairs() {
     const row = document.createElement('tr');
     row.dataset.idx = i;
     const oldCell = p.old
-      ? `<td class="filename drop-cell" data-idx="${i}" data-side="old" draggable="true" title="${p.old}">${basename(p.old)}</td>`
+      ? `<td class="filename drop-cell" data-idx="${i}" data-side="old" title="${p.old}">${basename(p.old)}</td>`
       : `<td class="filename drop-cell empty-slot" data-idx="${i}" data-side="old">＋ 원본을 여기에 끌어놓기</td>`;
     const newCell = p.new
-      ? `<td class="filename drop-cell" data-idx="${i}" data-side="new" draggable="true" title="${p.new}">${basename(p.new)}</td>`
+      ? `<td class="filename drop-cell" data-idx="${i}" data-side="new" title="${p.new}">${basename(p.new)}</td>`
       : `<td class="filename drop-cell empty-slot" data-idx="${i}" data-side="new">＋ 수정본을 여기에 끌어놓기</td>`;
     row.innerHTML = `
       ${oldCell}
@@ -137,16 +137,8 @@ function renderPairs() {
       li.className = 'unpaired-item';
       li.textContent = '📄 ' + basename(f);
       li.title = f;
-      li.draggable = true;
       li.dataset.path = f;
-      li.addEventListener('dragstart', (e) => {
-        e.dataTransfer.setData('application/compare-unpaired', f);
-        // text/plain fallback — some webviews only pass through plain MIME.
-        e.dataTransfer.setData('text/plain', 'UNPAIRED:' + f);
-        e.dataTransfer.effectAllowed = 'copyMove';
-        li.classList.add('dragging');
-      });
-      li.addEventListener('dragend', () => li.classList.remove('dragging'));
+      attachPointerDrag(li, { kind: 'unpaired', path: f });
       ul.appendChild(li);
     }
   } else {
@@ -175,86 +167,135 @@ function renderPairs() {
     });
   });
 
-  // Cell-level drag & drop:
-  //   - drag a filename cell onto another cell to move it there
-  //   - drag an unpaired list item onto a cell to assign it
-  //   - hold Ctrl while dragging to copy (source keeps its file)
+  // Pointer-based drag (HTML5 drag-drop is blocked by WebView2 when
+  // dragDropEnabled=true, so we track drag manually with pointer events).
   tbody.querySelectorAll('.drop-cell').forEach((cell) => {
-    // Only filled cells are source-draggable (empty placeholders are not).
-    if (!cell.classList.contains('empty-slot')) {
-      cell.addEventListener('dragstart', (e) => {
-        const idx = cell.dataset.idx;
-        const side = cell.dataset.side;
-        const payload = JSON.stringify({ idx, side });
-        e.dataTransfer.setData('application/compare-cell', payload);
-        // text/plain fallback — some webviews only pass through plain MIME.
-        e.dataTransfer.setData('text/plain', 'CELL:' + payload);
-        e.dataTransfer.effectAllowed = 'copyMove';
-        cell.classList.add('dragging');
-      });
-      cell.addEventListener('dragend', () => cell.classList.remove('dragging'));
-    }
-    cell.addEventListener('dragover', (e) => {
-      // WebView2 hides custom MIME types during dragover for security, so we
-      // can't filter by types here. We rely on the drop handler to validate.
-      // Only skip if the drag looks like an OS file drop (Tauri handles those).
-      if (e.dataTransfer.types.includes('Files')) return;
-      e.preventDefault();
-      e.dataTransfer.dropEffect = e.ctrlKey ? 'copy' : 'move';
-      cell.classList.add('drop-target');
-    });
-    cell.addEventListener('dragleave', () => cell.classList.remove('drop-target'));
-    cell.addEventListener('drop', (e) => {
-      cell.classList.remove('drop-target');
-      const dstIdx = parseInt(cell.dataset.idx, 10);
-      const dstSide = cell.dataset.side;
-      const isCopy = e.ctrlKey;
-
-      // Read payload — try custom MIME first, then text/plain fallback.
-      let unpairedPath = e.dataTransfer.getData('application/compare-unpaired');
-      let cellPayload = e.dataTransfer.getData('application/compare-cell');
-      if (!unpairedPath && !cellPayload) {
-        const plain = e.dataTransfer.getData('text/plain') || '';
-        if (plain.startsWith('UNPAIRED:')) unpairedPath = plain.slice(9);
-        else if (plain.startsWith('CELL:'))  cellPayload  = plain.slice(5);
-      }
-
-      // Case 1: dropping from unpaired list.
-      if (unpairedPath) {
-        e.preventDefault();
-        currentPairs[dstIdx][dstSide] = unpairedPath;
-        // Auto-derive base name from the old side if not yet set.
-        if (!currentPairs[dstIdx].base) {
-          const src = currentPairs[dstIdx].old || currentPairs[dstIdx].new;
-          if (src) currentPairs[dstIdx].base = basename(src).replace(/\.[^.]+$/, '');
-        }
-        if (!isCopy) {
-          // Move: remove from unpaired list.
-          currentUnpaired = currentUnpaired.filter((f) => f !== unpairedPath);
-        }
-        renderPairs();
-        if (currentPairs.some((p) => p.old && p.new)) show('options-section');
-        return;
-      }
-
-      // Case 2: dropping from another cell.
-      if (!cellPayload) return;
-      e.preventDefault();
-      const { idx: srcIdxStr, side: srcSide } = JSON.parse(cellPayload);
-      const srcIdx = parseInt(srcIdxStr, 10);
-      if (srcIdx === dstIdx && srcSide === dstSide) return;
-      const srcFile = currentPairs[srcIdx][srcSide];
-      const dstFile = currentPairs[dstIdx][dstSide];
-      if (isCopy) {
-        currentPairs[dstIdx][dstSide] = srcFile;
-      } else {
-        currentPairs[dstIdx][dstSide] = srcFile;
-        currentPairs[srcIdx][srcSide] = dstFile;
-      }
-      renderPairs();
+    if (cell.classList.contains('empty-slot')) return;
+    attachPointerDrag(cell, {
+      kind: 'cell',
+      srcIdx: parseInt(cell.dataset.idx, 10),
+      srcSide: cell.dataset.side,
     });
   });
 }
+
+// ---------- pointer-event based drag system ----------
+// Replaces HTML5 drag-drop because Tauri's dragDropEnabled:true swallows
+// HTML5 drag events at the OS level. Pointer events aren't affected.
+let activeDrag = null; // { kind, srcIdx?, srcSide?, path?, startX, startY, el, started }
+
+function attachPointerDrag(el, payload) {
+  el.addEventListener('pointerdown', (e) => {
+    // Ignore right-clicks and modifier-only clicks on buttons.
+    if (e.button !== 0) return;
+    if (e.target.closest('button')) return;
+    activeDrag = {
+      ...payload,
+      startX: e.clientX,
+      startY: e.clientY,
+      el,
+      started: false,
+    };
+    // Don't preventDefault on pointerdown — lets native text selection start
+    // if user just clicks; we cancel selection when drag actually begins.
+  });
+}
+
+document.addEventListener('pointermove', (e) => {
+  if (!activeDrag) return;
+  const dx = e.clientX - activeDrag.startX;
+  const dy = e.clientY - activeDrag.startY;
+  if (!activeDrag.started) {
+    // Require a few pixels of movement before treating it as a drag.
+    if (Math.hypot(dx, dy) < 5) return;
+    activeDrag.started = true;
+    activeDrag.el.classList.add('dragging');
+    // Kill any text selection that started during the click.
+    window.getSelection && window.getSelection().removeAllRanges();
+    // Set a drag-follower ghost element.
+    if (!activeDrag.ghost) {
+      const ghost = document.createElement('div');
+      ghost.className = 'drag-ghost';
+      ghost.textContent = activeDrag.kind === 'unpaired'
+        ? basename(activeDrag.path)
+        : basename(currentPairs[activeDrag.srcIdx][activeDrag.srcSide] || '');
+      document.body.appendChild(ghost);
+      activeDrag.ghost = ghost;
+    }
+  }
+  // Move ghost with cursor.
+  if (activeDrag.ghost) {
+    activeDrag.ghost.style.left = (e.clientX + 12) + 'px';
+    activeDrag.ghost.style.top = (e.clientY + 12) + 'px';
+  }
+  // Highlight the cell under the cursor.
+  document.querySelectorAll('.drop-cell.drop-target').forEach((c) =>
+    c.classList.remove('drop-target')
+  );
+  // Temporarily hide ghost so elementFromPoint sees the cell beneath.
+  if (activeDrag.ghost) activeDrag.ghost.style.display = 'none';
+  const under = document.elementFromPoint(e.clientX, e.clientY);
+  if (activeDrag.ghost) activeDrag.ghost.style.display = '';
+  const targetCell = under && under.closest('.drop-cell');
+  if (targetCell) targetCell.classList.add('drop-target');
+});
+
+document.addEventListener('pointerup', (e) => {
+  if (!activeDrag) return;
+  const drag = activeDrag;
+  activeDrag = null;
+  drag.el.classList.remove('dragging');
+  document.querySelectorAll('.drop-cell.drop-target').forEach((c) =>
+    c.classList.remove('drop-target')
+  );
+  if (drag.ghost) drag.ghost.remove();
+  if (!drag.started) return; // simple click — ignore
+
+  // Hide ghost during hit-test (already removed above, but defensive).
+  const under = document.elementFromPoint(e.clientX, e.clientY);
+  const cell = under && under.closest('.drop-cell');
+  if (!cell) return;
+  const dstIdx = parseInt(cell.dataset.idx, 10);
+  const dstSide = cell.dataset.side;
+  const isCopy = e.ctrlKey;
+
+  if (drag.kind === 'unpaired') {
+    currentPairs[dstIdx][dstSide] = drag.path;
+    if (!currentPairs[dstIdx].base) {
+      const src = currentPairs[dstIdx].old || currentPairs[dstIdx].new;
+      if (src) currentPairs[dstIdx].base = basename(src).replace(/\.[^.]+$/, '');
+    }
+    if (!isCopy) {
+      currentUnpaired = currentUnpaired.filter((f) => f !== drag.path);
+    }
+    renderPairs();
+    if (currentPairs.some((p) => p.old && p.new)) show('options-section');
+    return;
+  }
+
+  if (drag.kind === 'cell') {
+    if (drag.srcIdx === dstIdx && drag.srcSide === dstSide) return;
+    const srcFile = currentPairs[drag.srcIdx][drag.srcSide];
+    const dstFile = currentPairs[dstIdx][dstSide];
+    if (isCopy) {
+      currentPairs[dstIdx][dstSide] = srcFile;
+    } else {
+      currentPairs[dstIdx][dstSide] = srcFile;
+      currentPairs[drag.srcIdx][drag.srcSide] = dstFile;
+    }
+    renderPairs();
+  }
+});
+
+document.addEventListener('pointercancel', () => {
+  if (!activeDrag) return;
+  activeDrag.el.classList.remove('dragging');
+  if (activeDrag.ghost) activeDrag.ghost.remove();
+  activeDrag = null;
+  document.querySelectorAll('.drop-cell.drop-target').forEach((c) =>
+    c.classList.remove('drop-target')
+  );
+});
 
 function updateOutDirDisplay() {
   $('out-dir-display').textContent = currentOutDir || '(자동)';

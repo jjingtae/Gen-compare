@@ -371,6 +371,23 @@ section { margin-bottom: 20px; }
   cursor: default;
 }
 .drop-cell.empty-slot:hover { background: #f0f4fb; }
+
+/* Cursor-following label while dragging (pointer-event based system). */
+.drag-ghost {
+  position: fixed;
+  pointer-events: none;
+  z-index: 9999;
+  padding: 4px 10px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 12px;
+  border-radius: 4px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+  white-space: nowrap;
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .table-hint {
   padding: 8px 4px 0;
   font-size: 11.5px;
