@@ -45,6 +45,51 @@
 
       /* Ensure at least 4 pair rows are visible without scroll. */
       #pairs-section .table-wrap { min-height: 200px; }
+
+      /* Signature footer — small, understated, pinned at the bottom of the
+         window. The shimmer moves a bright gradient band left→right across
+         the text, looping every 4s. background-clip:text makes the gradient
+         paint the letters themselves. */
+      .signature {
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: 6px;
+        text-align: center;
+        pointer-events: none;
+        z-index: 1;
+      }
+      .signature-text {
+        font-size: 11px;
+        font-weight: 500;
+        letter-spacing: 0.08em;
+        background: linear-gradient(
+          100deg,
+          #b8c0cc 0%,
+          #b8c0cc 42%,
+          #3a7bd5 50%,
+          #b8c0cc 58%,
+          #b8c0cc 100%
+        );
+        background-size: 250% 100%;
+        background-position: 100% 0;
+        -webkit-background-clip: text;
+        background-clip: text;
+        -webkit-text-fill-color: transparent;
+        color: transparent;
+        animation: signature-shimmer 4s linear infinite;
+      }
+      @keyframes signature-shimmer {
+        0%   { background-position: 150% 0; }
+        100% { background-position: -150% 0; }
+      }
+      /* Emoji rendered in its own span so background-clip:text doesn't hide
+         the color glyph. Small size to match the signature text. */
+      .signature-emoji {
+        font-size: 12px;
+        margin-left: 4px;
+        vertical-align: middle;
+      }
     </style>
   </head>
   <body>
@@ -226,6 +271,11 @@
 
       <!-- Toast container -->
       <div id="toasts" class="toasts" aria-live="polite"></div>
+
+      <!-- Signature footer: small shimmer animation running left-to-right -->
+      <footer class="signature">
+        <span class="signature-text">© JINTAE  ·  다 이루어질 지니</span><span class="signature-emoji">🧞</span>
+      </footer>
     </div>
 
     <script type="module" src="main.js"></script>
