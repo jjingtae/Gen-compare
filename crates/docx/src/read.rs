@@ -47,6 +47,12 @@ pub struct RawParts {
     pub footnotes_xml: Option<Vec<u8>>,
     pub endnotes_xml: Option<Vec<u8>>,
     /// header1.xml, header2.xml, header3.xml etc. as (name, bytes)
+    /// Binary resources referenced by header/footer rels (images in
+    /// `word/media/*`, embedded objects in `word/embeddings/*`, embedded
+    /// fonts in `word/fonts/*`). Copied verbatim into the output so that
+    /// rels don't become dangling → Word would otherwise flag the output
+    /// as "corrupted".
+    pub binary_resources: Vec<(String, Vec<u8>)>,
     pub headers: Vec<(String, Vec<u8>)>,
     /// footer1.xml, footer2.xml, footer3.xml etc.
     pub footers: Vec<(String, Vec<u8>)>,
@@ -91,8 +97,21 @@ pub fn read_document<P: AsRef<Path>>(path: P) -> Result<DocxContent> {
     let mut raw_headers = Vec::new();
     let mut raw_footers = Vec::new();
     let mut raw_hf_rels = Vec::new();
+    let mut binary_resources: Vec<(String, Vec<u8>)> = Vec::new();
     let names: Vec<String> = zip.file_names().map(|s| s.to_string()).collect();
     for name in &names {
+        // Collect binary resources (images, embedded objects, fonts) — these
+        // are referenced by header/footer rels and must exist in the output
+        // or Word refuses to open the file.
+        if name.starts_with("word/media/")
+            || name.starts_with("word/embeddings/")
+            || name.starts_with("word/fonts/")
+        {
+            if let Some(bytes) = read_bytes(&mut zip, name) {
+                binary_resources.push((name.clone(), bytes));
+            }
+            continue;
+        }
         if name.starts_with("word/header") && name.ends_with(".xml") {
             if let Some(bytes) = read_bytes(&mut zip, name) {
                 if let Ok(ps) = parse_flat_paragraphs(&bytes) {
@@ -153,6 +172,7 @@ pub fn read_document<P: AsRef<Path>>(path: P) -> Result<DocxContent> {
         headers: raw_headers,
         footers: raw_footers,
         header_footer_rels: raw_hf_rels,
+        binary_resources,
     };
 
     Ok(DocxContent { body, headers, footers, comments, footnotes, endnotes, creator, last_modified_by, raw_parts })

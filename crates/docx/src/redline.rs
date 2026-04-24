@@ -93,51 +93,118 @@ pub fn write_redline<P: AsRef<Path>>(
     ops: &[BlockOp],
     opts: &RedlineOptions,
 ) -> Result<()> {
-    let file = File::create(path)?;
-    let mut zip = zip::ZipWriter::new(file);
-    let zopts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    // Atomic write: build the zip in a temp file next to the target, then
+    // rename into place. If anything fails mid-write we won't leave a
+    // half-written .docx that Word would report as "corrupted".
+    let final_path = path.as_ref();
+    let tmp_path = tmp_sibling(final_path);
+    // Remove any leftover temp from a previous failed run.
+    let _ = std::fs::remove_file(&tmp_path);
 
-    let parts = opts.source_parts.clone().unwrap_or_default();
+    // Wrap the actual writing so we can clean up the temp file on error.
+    let result: Result<()> = (|| {
+        let file = File::create(&tmp_path)?;
+        let mut zip = zip::ZipWriter::new(file);
+        let zopts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
-    zip.start_file("[Content_Types].xml", zopts)?;
-    zip.write_all(content_types_for(&parts).as_bytes())?;
+        let parts = opts.source_parts.clone().unwrap_or_default();
 
-    zip.start_file("_rels/.rels", zopts)?;
-    zip.write_all(ROOT_RELS.as_bytes())?;
+        zip.start_file("[Content_Types].xml", zopts)?;
+        zip.write_all(content_types_for(&parts).as_bytes())?;
 
-    zip.start_file("word/_rels/document.xml.rels", zopts)?;
-    zip.write_all(doc_rels_for(&parts).as_bytes())?;
+        zip.start_file("_rels/.rels", zopts)?;
+        zip.write_all(ROOT_RELS.as_bytes())?;
 
-    zip.start_file("word/document.xml", zopts)?;
-    zip.write_all(build_document(ops, opts).as_bytes())?;
+        zip.start_file("word/_rels/document.xml.rels", zopts)?;
+        zip.write_all(doc_rels_for(&parts).as_bytes())?;
 
-    // Copy preserved parts verbatim. Missing parts are harmless — style/font
-    // references simply fall back to reader defaults.
-    copy_part(&mut zip, zopts, "word/styles.xml", &parts.styles_xml)?;
-    copy_part(&mut zip, zopts, "word/numbering.xml", &parts.numbering_xml)?;
-    copy_part(&mut zip, zopts, "word/theme/theme1.xml", &parts.theme1_xml)?;
-    copy_part(&mut zip, zopts, "word/fontTable.xml", &parts.font_table_xml)?;
-    copy_part(&mut zip, zopts, "word/settings.xml", &parts.settings_xml)?;
-    copy_part(&mut zip, zopts, "word/webSettings.xml", &parts.web_settings_xml)?;
-    copy_part(&mut zip, zopts, "word/stylesWithEffects.xml", &parts.style_with_effects_xml)?;
-    copy_part(&mut zip, zopts, "word/comments.xml", &parts.comments_xml)?;
-    copy_part(&mut zip, zopts, "word/footnotes.xml", &parts.footnotes_xml)?;
-    copy_part(&mut zip, zopts, "word/endnotes.xml", &parts.endnotes_xml)?;
-    for (name, bytes) in &parts.headers {
-        zip.start_file(name, zopts)?;
-        zip.write_all(bytes)?;
+        zip.start_file("word/document.xml", zopts)?;
+        zip.write_all(build_document(ops, opts).as_bytes())?;
+
+        // Copy preserved parts verbatim. Missing parts are harmless — style/font
+        // references simply fall back to reader defaults.
+        copy_part(&mut zip, zopts, "word/styles.xml", &parts.styles_xml)?;
+        copy_part(&mut zip, zopts, "word/numbering.xml", &parts.numbering_xml)?;
+        copy_part(&mut zip, zopts, "word/theme/theme1.xml", &parts.theme1_xml)?;
+        copy_part(&mut zip, zopts, "word/fontTable.xml", &parts.font_table_xml)?;
+        copy_part(&mut zip, zopts, "word/settings.xml", &parts.settings_xml)?;
+        copy_part(&mut zip, zopts, "word/webSettings.xml", &parts.web_settings_xml)?;
+        copy_part(&mut zip, zopts, "word/stylesWithEffects.xml", &parts.style_with_effects_xml)?;
+        copy_part(&mut zip, zopts, "word/comments.xml", &parts.comments_xml)?;
+        copy_part(&mut zip, zopts, "word/footnotes.xml", &parts.footnotes_xml)?;
+        copy_part(&mut zip, zopts, "word/endnotes.xml", &parts.endnotes_xml)?;
+        for (name, bytes) in &parts.headers {
+            zip.start_file(name, zopts)?;
+            zip.write_all(bytes)?;
+        }
+        for (name, bytes) in &parts.footers {
+            zip.start_file(name, zopts)?;
+            zip.write_all(bytes)?;
+        }
+        for (name, bytes) in &parts.header_footer_rels {
+            zip.start_file(name, zopts)?;
+            zip.write_all(bytes)?;
+        }
+        // Copy binary resources (images, embedded objects, embedded fonts)
+        // referenced by header/footer rels. Without these, Word considers
+        // the rels "dangling" and refuses to open the document as corrupted.
+        // Images/fonts must use Stored (no deflate) since they're already
+        // compressed or binary — deflating them can cause reader quirks.
+        let store_opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        for (name, bytes) in &parts.binary_resources {
+            zip.start_file(name, store_opts)?;
+            zip.write_all(bytes)?;
+        }
+
+        let finished = zip.finish()?;
+        // Force data to disk before rename.
+        finished.sync_all()?;
+        Ok(())
+    })();
+
+    if let Err(e) = result {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e);
     }
-    for (name, bytes) in &parts.footers {
-        zip.start_file(name, zopts)?;
-        zip.write_all(bytes)?;
-    }
-    for (name, bytes) in &parts.header_footer_rels {
-        zip.start_file(name, zopts)?;
-        zip.write_all(bytes)?;
-    }
 
-    zip.finish()?;
+    // Atomic replace. On Windows, rename fails if target exists, so remove first.
+    let _ = std::fs::remove_file(final_path);
+    std::fs::rename(&tmp_path, final_path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp_path);
+        e
+    })?;
     Ok(())
+}
+
+fn tmp_sibling(final_path: &Path) -> std::path::PathBuf {
+    let parent = final_path.parent().unwrap_or(Path::new("."));
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let name = final_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("out.docx");
+    parent.join(format!(".{}.{}.tmp", name, nonce))
+}
+
+fn mime_for_ext(ext: &str) -> &'static str {
+    match ext {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "bmp" => "image/bmp",
+        "tif" | "tiff" => "image/tiff",
+        "svg" => "image/svg+xml",
+        "wmf" => "image/x-wmf",
+        "emf" => "image/x-emf",
+        "ico" => "image/x-icon",
+        "ttf" => "application/x-font-ttf",
+        "otf" => "application/x-font-otf",
+        "bin" => "application/vnd.openxmlformats-officedocument.oleObject",
+        _ => "application/octet-stream",
+    }
 }
 
 fn copy_part(
@@ -158,9 +225,25 @@ fn content_types_for(parts: &RawParts) -> String {
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
 <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
-<Default Extension="xml" ContentType="application/xml"/>
-<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>"#,
+<Default Extension="xml" ContentType="application/xml"/>"#,
     );
+    // Declare content types for any binary-resource extensions we copy.
+    // Word is picky — if a file's extension isn't declared here, it flags
+    // the package as corrupted.
+    let mut seen_ext: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (name, _) in &parts.binary_resources {
+        if let Some(ext) = std::path::Path::new(name).extension().and_then(|e| e.to_str()) {
+            let ext_lower = ext.to_ascii_lowercase();
+            if seen_ext.insert(ext_lower.clone()) {
+                let mime = mime_for_ext(&ext_lower);
+                s.push_str(&format!(
+                    r#"<Default Extension="{}" ContentType="{}"/>"#,
+                    ext_lower, mime
+                ));
+            }
+        }
+    }
+    s.push_str(r#"<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>"#);
     if parts.styles_xml.is_some() {
         s.push_str(r#"<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>"#);
     }
