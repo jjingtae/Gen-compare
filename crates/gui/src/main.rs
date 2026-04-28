@@ -144,16 +144,15 @@ fn try_run_one(p: &RunPair, outputs: Outputs, author: Option<&str>) -> anyhow::R
     let out_dir = Path::new(&p.out_dir);
     std::fs::create_dir_all(out_dir).context("create output directory")?;
 
-    // Read both docs (once) — reuse for all output formats.
-    let od = read_document(old)?;
-    let nd = read_document(new)?;
+    let (old_docx, _old_tmp) = ensure_docx(old)?;
+    let (new_docx, _new_tmp) = ensure_docx(new)?;
+
+    let od = read_document(&old_docx)?;
+    let nd = read_document(&new_docx)?;
     let body_ops: Vec<BlockOp> = diff_blocks(&od.body, &nd.body);
 
-    // Author resolution:
-    //   1. explicit user setting (non-empty) wins
-    //   2. else fall back to the new doc's lastModifiedBy (who made the edits)
-    //   3. else RedlineOptions::default() fills in Windows username
     let resolved_author: Option<String> = author
+        .filter(|s| !s.trim().is_empty())
         .map(|s| s.to_string())
         .or_else(|| nd.last_modified_by.clone())
         .or_else(|| nd.creator.clone());
@@ -171,60 +170,45 @@ fn try_run_one(p: &RunPair, outputs: Outputs, author: Option<&str>) -> anyhow::R
         o
     };
 
+    let out_base = output_base_for_pair(old, new);
     let mut produced = Vec::new();
 
-    // Output filenames use a type prefix (Redline_, TrackChange_, CPO_) so
-    // all files for one pair sort/group together in the folder view.
-    // Word = color DOCX
     if outputs.word || outputs.pdf {
-        // PDF needs a source DOCX; color DOCX serves both if either is selected.
-        let color_path = out_dir.join(format!("Redline_{}.docx", p.out_base));
+        let color_path = out_dir.join(format!("Redline_{}.docx", out_base));
         write_redline(&color_path, &body_ops, &base_opts(RedlineStyle::Color))?;
         if outputs.word {
             produced.push(color_path.to_string_lossy().into_owned());
         }
         if outputs.pdf {
-            let pdf_path = out_dir.join(format!("Redline_{}.pdf", p.out_base));
+            let pdf_path = out_dir.join(format!("Redline_{}.pdf", out_base));
             convert_to_pdf(&color_path, &pdf_path)?;
             produced.push(pdf_path.to_string_lossy().into_owned());
             if !outputs.word {
-                // Clean up the intermediate color DOCX.
                 let _ = std::fs::remove_file(&color_path);
             }
         }
     }
 
     if outputs.track_change {
-        let tc_path = out_dir.join(format!("TrackChange_{}.docx", p.out_base));
+        let tc_path = out_dir.join(format!("TrackChange_{}.docx", out_base));
         write_redline(&tc_path, &body_ops, &base_opts(RedlineStyle::TrackChange))?;
         produced.push(tc_path.to_string_lossy().into_owned());
     }
 
-    // CPO — Change Page Only.
-    //
-    // Preserves the original page layout: we render the full color DOCX to a
-    // complete PDF, ask Word which pages actually contain colored (changed)
-    // runs, and then delete all the other pages from the PDF with lopdf.
-    // Unlike the old "filter blocks then re-render" approach, this keeps
-    // margins, headers/footers, images and pagination exactly as they are in
-    // the real document — a 1-page change in a 100-page doc yields 1 page of
-    // PDF with that page's original layout intact.
     if outputs.cpo {
-        // Reuse the color DOCX we just built for Word/PDF output, otherwise
-        // build a scratch one just for CPO.
-        let reuse_color = out_dir.join(format!("Redline_{}.docx", p.out_base));
+        let reuse_color = out_dir.join(format!("Redline_{}.docx", out_base));
         let (color_src, cleanup_color) = if reuse_color.exists() {
             (reuse_color.clone(), false)
         } else {
-            let tmp = out_dir.join(format!("_cpo_src_{}.docx", p.out_base));
+            let tmp = out_dir.join(format!("_cpo_src_{}.docx", out_base));
             write_redline(&tmp, &body_ops, &base_opts(RedlineStyle::Color))?;
             (tmp, true)
         };
 
-        let full_pdf = out_dir.join(format!("_cpo_full_{}.pdf", p.out_base));
+        let full_pdf = out_dir.join(format!("_cpo_full_{}.pdf", out_base));
         convert_to_pdf(&color_src, &full_pdf)?;
 
-        let cpo_path = out_dir.join(format!("CPO_{}.pdf", p.out_base));
+        let cpo_path = out_dir.join(format!("CPO_{}.pdf", out_base));
         match detect_change_pages(&color_src) {
             Ok(pages) if !pages.is_empty() => {
                 extract_pdf_pages(&full_pdf, &cpo_path, &pages)?;
@@ -498,4 +482,111 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("run tauri app");
+}
+
+struct TempDocx(PathBuf);
+
+impl Drop for TempDocx {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn ensure_docx(path: &Path) -> anyhow::Result<(PathBuf, Option<TempDocx>)> {
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase());
+
+    match ext.as_deref() {
+        Some("docx") => Ok((path.to_path_buf(), None)),
+        Some("doc") => {
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let tmp_docx = std::env::temp_dir().join(format!("gencompare_doc_{}.docx", nonce));
+
+            convert_doc_to_docx_word_com(path, &tmp_docx)
+                .with_context(|| format!("DOC → DOCX 변환 실패: {}", path.display()))?;
+
+            Ok((tmp_docx.clone(), Some(TempDocx(tmp_docx))))
+        }
+        Some(e) => anyhow::bail!(
+            "'{}': 지원하지 않는 확장자 '.{}'. DOCX 또는 DOC 파일을 입력하세요.",
+            path.display(),
+            e
+        ),
+        None => anyhow::bail!(
+            "'{}': 파일 확장자가 없습니다. DOCX 또는 DOC 파일을 입력하세요.",
+            path.display()
+        ),
+    }
+}
+
+fn convert_doc_to_docx_word_com(src: &Path, dst: &Path) -> anyhow::Result<()> {
+    let _guard = PDF_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let abs_src = std::fs::canonicalize(src).unwrap_or_else(|_| src.to_path_buf());
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    const VBS: &str = r#"
+On Error Resume Next
+Set args = WScript.Arguments
+Set w = CreateObject("Word.Application")
+If Err.Number <> 0 Then WScript.Quit 2
+w.Visible = False
+w.DisplayAlerts = 0
+Set doc = w.Documents.Open(args(0), False, True)
+If Err.Number <> 0 Then w.Quit : WScript.Quit 3
+doc.SaveAs2 args(1), 16
+If Err.Number <> 0 Then doc.Close False : w.Quit : WScript.Quit 4
+doc.Close False
+w.Quit
+WScript.Quit 0
+"#;
+
+    let out = run_vbs(VBS, &[&abs_src.to_string_lossy(), &dst.to_string_lossy()])?;
+    if out.status.success() && dst.exists() {
+        Ok(())
+    } else {
+        anyhow::bail!("DOC → DOCX 변환 실패. Microsoft Word가 설치되어 있고 자동화 실행이 허용되어야 합니다.")
+    }
+}
+
+fn output_base_for_pair(old: &Path, new: &Path) -> String {
+    format!(
+        "{}_{}",
+        sanitize_filename(&file_stem_or_name(old)),
+        sanitize_filename(&file_stem_or_name(new))
+    )
+}
+
+fn file_stem_or_name(path: &Path) -> String {
+    path.file_stem()
+        .or_else(|| path.file_name())
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "document".to_string())
+}
+
+fn sanitize_filename(s: &str) -> String {
+    let cleaned: String = s
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+
+    let trimmed = cleaned.trim_matches('_');
+    if trimmed.is_empty() {
+        "document".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
