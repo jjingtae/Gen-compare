@@ -39,15 +39,14 @@ pub fn convert_doc_to_docx(src: &Path, dst: &Path) -> Result<()> {
 
             let documents = word.get_property("Documents", vec![])?;
 
-            let _ = documents.invoke_method(
+            let doc = documents.invoke_method_object(
                 "Open",
                 vec![
                     VariantValue::Bstr(src.to_string_lossy().to_string()),
+                    VariantValue::Bool(false),
+                    VariantValue::Bool(false),
                 ],
             )?;
-
-            // Open 반환값을 믿지 말고 Word의 현재 문서를 직접 잡는다.
-            let doc = word.get_property("ActiveDocument", vec![])?;
 
             let save_result = doc.invoke_method(
                 "SaveAs2",
@@ -154,18 +153,26 @@ impl ComObject {
     }
 
     unsafe fn put_property(&self, name: &str, args: Vec<VariantValue>) -> Result<()> {
-        let _ = self.invoke_raw(name, DISPATCH_PROPERTYPUT, args)?;
+        let mut result = self.invoke_raw(name, DISPATCH_PROPERTYPUT, args)?;
+        let _ = VariantClear(&mut result);
         Ok(())
     }
 
-    unsafe fn invoke_method(&self, name: &str, args: Vec<VariantValue>) -> Result<ComObject> {
+    unsafe fn invoke_method(&self, name: &str, args: Vec<VariantValue>) -> Result<()> {
+        let mut result = self.invoke_raw(name, DISPATCH_METHOD, args)?;
+        let _ = VariantClear(&mut result);
+        Ok(())
+    }
+
+    unsafe fn invoke_method_object(
+        &self,
+        name: &str,
+        args: Vec<VariantValue>,
+    ) -> Result<ComObject> {
         let result = self.invoke_raw(name, DISPATCH_METHOD, args)?;
 
-        if variant_is_empty(&result) {
-            Ok(self.clone())
-        } else {
-            Ok(variant_to_dispatch(result).unwrap_or_else(|| self.clone()))
-        }
+        variant_to_dispatch(result)
+            .with_context(|| format!("COM 메서드 결과가 IDispatch 객체가 아닙니다: {name}"))
     }
 
     unsafe fn invoke_raw(
@@ -268,8 +275,4 @@ unsafe fn variant_to_dispatch(mut variant: VARIANT) -> Option<ComObject> {
     )?;
 
     Some(ComObject { dispatch })
-}
-
-unsafe fn variant_is_empty(variant: &VARIANT) -> bool {
-    (*variant.Anonymous.Anonymous).vt == VT_EMPTY
 }
