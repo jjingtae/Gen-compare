@@ -6,12 +6,8 @@ pub fn convert_doc_to_docx_word_com(src: &Path, dst: &Path) -> Result<()> {
     use windows::core::{BSTR, GUID, Interface, PCWSTR};
     use windows::Win32::System::Com::{
         CLSCTX_LOCAL_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
-        CoUninitialize, DISPATCH_FLAGS, DISPATCH_METHOD, DISPATCH_PROPERTYGET,
-        DISPATCH_PROPERTYPUT, DISPPARAMS, EXCEPINFO, IDispatch,
-    };
-    use windows::Win32::System::Ole::{CLSIDFromProgID, DISPID_PROPERTYPUT};
-    use windows::Win32::System::Variant::{
-        VariantClear, VARIANT, VT_BOOL, VT_BSTR, VT_DISPATCH, VT_I4,
+        CoUninitialize, CLSIDFromProgID, DISPATCH_METHOD, DISPATCH_PROPERTYGET,
+        DISPATCH_PROPERTYPUT, DISPPARAMS, EXCEPINFO, IDispatch, VARIANT,
     };
 
     let abs_src = std::fs::canonicalize(src).unwrap_or_else(|_| src.to_path_buf());
@@ -20,6 +16,7 @@ pub fn convert_doc_to_docx_word_com(src: &Path, dst: &Path) -> Result<()> {
 
     unsafe {
         CoInitializeEx(None, COINIT_APARTMENTTHREADED)
+            .ok()
             .context("Word COM 초기화 실패")?;
 
         let result = (|| -> Result<()> {
@@ -122,12 +119,11 @@ unsafe fn invoke_raw(
     obj: &windows::Win32::System::Com::IDispatch,
     name: &str,
     flags: windows::Win32::System::Com::DISPATCH_FLAGS,
-    args: &mut [windows::Win32::System::Variant::VARIANT],
-) -> Result<windows::Win32::System::Variant::VARIANT> {
+    args: &mut [windows::Win32::System::Com::VARIANT],
+) -> Result<windows::Win32::System::Com::VARIANT> {
     use windows::core::GUID;
-    use windows::Win32::System::Com::{DISPATCH_PROPERTYPUT, DISPPARAMS, EXCEPINFO};
+    use windows::Win32::System::Com::{DISPATCH_PROPERTYPUT, DISPPARAMS, EXCEPINFO, VARIANT};
     use windows::Win32::System::Ole::DISPID_PROPERTYPUT;
-    use windows::Win32::System::Variant::VARIANT;
 
     let id = dispid(obj, name)?;
     let mut result = VARIANT::default();
@@ -135,7 +131,6 @@ unsafe fn invoke_raw(
     let mut arg_err = 0u32;
 
     let mut named = [DISPID_PROPERTYPUT];
-
     let is_prop_put = flags == DISPATCH_PROPERTYPUT;
 
     let mut params = DISPPARAMS {
@@ -172,7 +167,7 @@ unsafe fn invoke_raw(
 unsafe fn invoke_method_void(
     obj: &windows::Win32::System::Com::IDispatch,
     name: &str,
-    args: &mut [windows::Win32::System::Variant::VARIANT],
+    args: &mut [windows::Win32::System::Com::VARIANT],
 ) -> Result<()> {
     use windows::Win32::System::Com::DISPATCH_METHOD;
     use windows::Win32::System::Variant::VariantClear;
@@ -186,7 +181,7 @@ unsafe fn invoke_method_void(
 unsafe fn invoke_method_dispatch(
     obj: &windows::Win32::System::Com::IDispatch,
     name: &str,
-    args: &mut [windows::Win32::System::Variant::VARIANT],
+    args: &mut [windows::Win32::System::Com::VARIANT],
 ) -> Result<windows::Win32::System::Com::IDispatch> {
     use windows::core::Interface;
     use windows::Win32::System::Com::{DISPATCH_METHOD, IDispatch};
@@ -272,9 +267,10 @@ unsafe fn set_property_i4(
 }
 
 #[cfg(target_os = "windows")]
-fn variant_bstr(s: &str) -> windows::Win32::System::Variant::VARIANT {
+fn variant_bstr(s: &str) -> windows::Win32::System::Com::VARIANT {
     use windows::core::BSTR;
-    use windows::Win32::System::Variant::{VARIANT, VT_BSTR};
+    use windows::Win32::System::Com::VARIANT;
+    use windows::Win32::System::Variant::VT_BSTR;
 
     let mut v = VARIANT::default();
     unsafe {
@@ -286,8 +282,9 @@ fn variant_bstr(s: &str) -> windows::Win32::System::Variant::VARIANT {
 }
 
 #[cfg(target_os = "windows")]
-fn variant_bool(value: bool) -> windows::Win32::System::Variant::VARIANT {
-    use windows::Win32::System::Variant::{VARIANT, VT_BOOL};
+fn variant_bool(value: bool) -> windows::Win32::System::Com::VARIANT {
+    use windows::Win32::System::Com::VARIANT;
+    use windows::Win32::System::Variant::VT_BOOL;
 
     let mut v = VARIANT::default();
     unsafe {
@@ -299,8 +296,9 @@ fn variant_bool(value: bool) -> windows::Win32::System::Variant::VARIANT {
 }
 
 #[cfg(target_os = "windows")]
-fn variant_i4(value: i32) -> windows::Win32::System::Variant::VARIANT {
-    use windows::Win32::System::Variant::{VARIANT, VT_I4};
+fn variant_i4(value: i32) -> windows::Win32::System::Com::VARIANT {
+    use windows::Win32::System::Com::VARIANT;
+    use windows::Win32::System::Variant::VT_I4;
 
     let mut v = VARIANT::default();
     unsafe {
@@ -311,7 +309,7 @@ fn variant_i4(value: i32) -> windows::Win32::System::Variant::VARIANT {
 }
 
 #[cfg(target_os = "windows")]
-unsafe fn clear_variants(args: &mut [windows::Win32::System::Variant::VARIANT]) {
+unsafe fn clear_variants(args: &mut [windows::Win32::System::Com::VARIANT]) {
     use windows::Win32::System::Variant::VariantClear;
 
     for v in args {
