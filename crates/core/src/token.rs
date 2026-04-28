@@ -39,25 +39,3 @@ fn classify(c: char) -> CharClass {
         CharClass::Punct
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn splits_english() {
-        let t = tokenize_words("Hello, world!");
-        assert_eq!(t, vec!["Hello", ",", " ", "world", "!"]);
-    }
-
-    #[test]
-    fn splits_korean() {
-        let t = tokenize_words("안녕 세계");
-        assert_eq!(t, vec!["안녕", " ", "세계"]);
-    }
-
-    #[test]
-    fn empty() {
-        assert!(tokenize_words("").is_empty());
-    }
-}

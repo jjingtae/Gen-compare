@@ -158,7 +158,7 @@ pub fn diff_paragraphs(old: &[String], new: &[String]) -> Vec<ParaOp> {
                 for i in 0..paired {
                     let o = &old[old_index + i];
                     let n = &new[new_index + i];
-                    if similarity(o, n) >= SIMILARITY_THRESHOLD {
+                    if should_pair_as_modified(o, n) {
                         out.push(ParaOp::Modified { changes: diff_words(o, n) });
                     } else {
                         out.push(ParaOp::Delete { text: o.clone() });
@@ -174,14 +174,71 @@ pub fn diff_paragraphs(old: &[String], new: &[String]) -> Vec<ParaOp> {
             }
         }
     }
-    detect_moves(out)
+    // Move detection is intentionally disabled for legal-document comparison.
+    out
 }
 
 /// Minimum word-level similarity for two paragraphs to be considered a "Modified pair"
 /// rather than a clean Delete+Insert. Tuned empirically: above ~0.35 the word-level
 /// redline stays readable; below that the cost of showing inline diff exceeds the
 /// benefit of side-by-side matching.
-const SIMILARITY_THRESHOLD: f32 = 0.35;
+const SIMILARITY_THRESHOLD: f32 = 0.25;
+
+
+fn should_pair_as_modified(a: &str, b: &str) -> bool {
+    if same_legal_anchor(a, b) {
+        return true;
+    }
+    similarity(a, b) >= SIMILARITY_THRESHOLD
+}
+
+fn same_legal_anchor(a: &str, b: &str) -> bool {
+    match (legal_anchor(a), legal_anchor(b)) {
+        (Some(x), Some(y)) => x == y,
+        _ => false,
+    }
+}
+
+fn legal_anchor(s: &str) -> Option<String> {
+    let t = s.trim_start();
+    if t.is_empty() { return None; }
+    if let Some(rest) = t.strip_prefix('제') {
+        let mut digits = String::new();
+        let mut saw_jo = false;
+        for ch in rest.chars() {
+            if ch.is_ascii_digit() { digits.push(ch); }
+            else if ch == '조' { saw_jo = true; break; }
+            else if ch.is_whitespace() { continue; }
+            else { break; }
+        }
+        if saw_jo && !digits.is_empty() { return Some(format!("article:{}", digits)); }
+    }
+    let mut chars = t.chars();
+    let first = chars.next()?;
+    if first == '(' {
+        let mut inner = String::new();
+        for ch in chars {
+            if ch == ')' { break; }
+            if ch.is_ascii_digit() { inner.push(ch); } else { return None; }
+        }
+        if !inner.is_empty() { return Some(format!("paren:{}", inner)); }
+    }
+    if first.is_ascii_digit() {
+        let mut num = first.to_string();
+        for ch in chars {
+            if ch.is_ascii_digit() { num.push(ch); }
+            else if ch == '.' || ch == ')' || ch.is_whitespace() { return Some(format!("num:{}", num)); }
+            else { break; }
+        }
+    }
+    if ('①'..='⑳').contains(&first) { return Some(format!("circled:{}", first)); }
+    if ('가'..='하').contains(&first) {
+        if let Some(ch) = chars.next() {
+            if ch == '.' || ch == ')' || ch.is_whitespace() || ch == '\t' { return Some(format!("korean:{}", first)); }
+        }
+    }
+    None
+}
 
 fn similarity(a: &str, b: &str) -> f32 {
     if a.is_empty() && b.is_empty() {

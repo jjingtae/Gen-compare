@@ -57,7 +57,7 @@ impl CellOp {
 }
 
 const BLOCK_TABLE_SIMILARITY: f32 = 0.4;
-const ROW_MATCH_THRESHOLD: f32 = 0.5;
+const ROW_MATCH_THRESHOLD: f32 = 0.35;
 
 /// Diff two block streams. Paragraphs use the existing paragraph-level engine.
 /// Tables are matched by content signature; matched tables get structural diff.
@@ -99,7 +99,8 @@ pub fn diff_blocks(old: &[Block], new: &[Block]) -> Vec<BlockOp> {
     // that came from separate top-level LCS ops (not a Replace block) as
     // MovedFrom/MovedTo. Without this, a paragraph that moved across matched
     // boundaries would show as a delete-and-insert instead of a green move.
-    detect_cross_block_moves(out)
+    // Move detection disabled: repeated legal boilerplate produced many false positives.
+    out
 }
 
 const CROSS_MOVE_THRESHOLD: f32 = 0.85;

@@ -6,6 +6,8 @@
 //! save-format button state. It calls into these Rust commands which do the
 //! actual work using compare-core + compare-docx (same engine as the CLI).
 
+mod word_com;
+
 use anyhow::Context;
 use compare_core::{detect_pairs as core_detect_pairs, diff_blocks, stats_of_blocks, BlockOp, Stats};
 use compare_docx::{read_document, write_redline, RedlineOptions, RedlineStyle};
@@ -526,34 +528,8 @@ fn ensure_docx(path: &Path) -> anyhow::Result<(PathBuf, Option<TempDocx>)> {
 
 fn convert_doc_to_docx_word_com(src: &Path, dst: &Path) -> anyhow::Result<()> {
     let _guard = PDF_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-    let abs_src = std::fs::canonicalize(src).unwrap_or_else(|_| src.to_path_buf());
-    if let Some(parent) = dst.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    const VBS: &str = r#"
-On Error Resume Next
-Set args = WScript.Arguments
-Set w = CreateObject("Word.Application")
-If Err.Number <> 0 Then WScript.Quit 2
-w.Visible = False
-w.DisplayAlerts = 0
-Set doc = w.Documents.Open(args(0), False, True)
-If Err.Number <> 0 Then w.Quit : WScript.Quit 3
-doc.SaveAs2 args(1), 16
-If Err.Number <> 0 Then doc.Close False : w.Quit : WScript.Quit 4
-doc.Close False
-w.Quit
-WScript.Quit 0
-"#;
-
-    let out = run_vbs(VBS, &[&abs_src.to_string_lossy(), &dst.to_string_lossy()])?;
-    if out.status.success() && dst.exists() {
-        Ok(())
-    } else {
-        anyhow::bail!("DOC → DOCX 변환 실패. Microsoft Word가 설치되어 있고 자동화 실행이 허용되어야 합니다.")
-    }
+    word_com::convert_doc_to_docx(src, dst)
+        .with_context(|| "convert DOC to DOCX using direct Word COM")
 }
 
 fn output_base_for_pair(old: &Path, new: &Path) -> String {

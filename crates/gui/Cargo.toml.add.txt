@@ -1,0 +1,6 @@
+# Add this under [dependencies] in crates/gui/Cargo.toml
+windows = { version = "0.58", features = [
+  "Win32_Foundation",
+  "Win32_System_Com",
+  "Win32_System_Ole"
+] }
