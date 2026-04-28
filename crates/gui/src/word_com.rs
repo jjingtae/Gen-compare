@@ -18,9 +18,31 @@ const LCID_SYSTEM_DEFAULT: u32 = 0x0800;
 const WD_FORMAT_XML_DOCUMENT: i32 = 16;
 const DISPID_PROPERTYPUT: i32 = -3;
 
+/// \\?\ 접두사 제거 (Word COM은 이 형식 처리 불가)
+fn normalize_path(path: &Path) -> Result<String> {
+    let canonical = std::fs::canonicalize(path)
+        .with_context(|| format!("경로 확인 실패: {}", path.display()))?;
+
+    let s = canonical.to_string_lossy().to_string();
+
+    // \\?\UNC\server\share → \\server\share
+    if s.starts_with(r"\\?\UNC\") {
+        return Ok(format!(r"\\{}", &s[8..]));
+    }
+
+    // \\?\C:\... → C:\...
+    if s.starts_with(r"\\?\") {
+        return Ok(s[4..].to_string());
+    }
+
+    Ok(s)
+}
+
 pub fn convert_doc_to_docx(src: &Path, dst: &Path) -> Result<()> {
-    let src = std::fs::canonicalize(src)
+    let src_str = normalize_path(src)
         .with_context(|| format!("DOC 파일 경로 확인 실패: {}", src.display()))?;
+
+    let dst_path = dst.to_path_buf();
 
     if let Some(parent) = dst.parent() {
         std::fs::create_dir_all(parent)
@@ -28,6 +50,21 @@ pub fn convert_doc_to_docx(src: &Path, dst: &Path) -> Result<()> {
     }
 
     let _ = std::fs::remove_file(dst);
+
+    // dst도 정규화 (파일이 없을 수 있으므로 parent만 canonicalize)
+    let dst_str = {
+        let parent = dst.parent().unwrap_or(dst);
+        let canonical_parent = std::fs::canonicalize(parent)
+            .unwrap_or_else(|_| parent.to_path_buf());
+        let parent_str = canonical_parent.to_string_lossy().to_string();
+        let parent_str = if parent_str.starts_with(r"\\?\") {
+            parent_str[4..].to_string()
+        } else {
+            parent_str
+        };
+        let file_name = dst.file_name().unwrap_or_default().to_string_lossy();
+        format!(r"{}\{}", parent_str, file_name)
+    };
 
     unsafe {
         let _com = ComApartment::init()?;
@@ -39,39 +76,35 @@ pub fn convert_doc_to_docx(src: &Path, dst: &Path) -> Result<()> {
 
             let documents = word.get_property("Documents", vec![])?;
 
-            // Open 반환값을 Document로 신뢰하지 않는다.
-            // 일부 Word COM 환경에서는 Open 결과가 IDispatch로 안 돌아온다.
-            documents.invoke_method(
+            let doc = documents.invoke_method(
                 "Open",
                 vec![
-                    VariantValue::Bstr(src.to_string_lossy().to_string()),
+                    VariantValue::Bstr(src_str.clone()),
                     VariantValue::Bool(false),
                     VariantValue::Bool(false),
                 ],
             )?;
 
-            // 새 Word.Application 인스턴스이므로 열린 문서는 1번으로 잡는다.
-            let doc = documents.invoke_method_object(
-                "Item",
-                vec![VariantValue::I4(1)],
-            )?;
-
-            let save_as2 = doc.invoke_method(
+            let save_result = doc.invoke_method(
                 "SaveAs2",
                 vec![
-                    VariantValue::Bstr(dst.to_string_lossy().to_string()),
+                    VariantValue::Bstr(dst_str.clone()),
                     VariantValue::I4(WD_FORMAT_XML_DOCUMENT),
                 ],
             );
 
-            if save_as2.is_err() {
-                doc.invoke_method(
-                    "SaveAs",
-                    vec![
-                        VariantValue::Bstr(dst.to_string_lossy().to_string()),
-                        VariantValue::I4(WD_FORMAT_XML_DOCUMENT),
-                    ],
-                )?;
+            match save_result {
+                Ok(_) => {}
+                Err(e) if e.to_string().contains("0x80020006") => {
+                    doc.invoke_method(
+                        "SaveAs",
+                        vec![
+                            VariantValue::Bstr(dst_str.clone()),
+                            VariantValue::I4(WD_FORMAT_XML_DOCUMENT),
+                        ],
+                    )?;
+                }
+                Err(e) => return Err(e),
             }
 
             let _ = doc.invoke_method("Close", vec![VariantValue::Bool(false)]);
@@ -87,10 +120,10 @@ pub fn convert_doc_to_docx(src: &Path, dst: &Path) -> Result<()> {
         result?;
     }
 
-    if !dst.exists() {
+    if !dst_path.exists() {
         anyhow::bail!(
             "DOCX 변환은 실행됐지만 결과 파일이 생성되지 않았습니다: {}",
-            dst.display()
+            dst_path.display()
         );
     }
 
@@ -161,26 +194,19 @@ impl ComObject {
     }
 
     unsafe fn put_property(&self, name: &str, args: Vec<VariantValue>) -> Result<()> {
-        let mut result = self.invoke_raw(name, DISPATCH_PROPERTYPUT, args)?;
-        let _ = VariantClear(&mut result);
+        let _ = self.invoke_raw(name, DISPATCH_PROPERTYPUT, args)?;
         Ok(())
     }
 
-    unsafe fn invoke_method(&self, name: &str, args: Vec<VariantValue>) -> Result<()> {
-        let mut result = self.invoke_raw(name, DISPATCH_METHOD, args)?;
-        let _ = VariantClear(&mut result);
-        Ok(())
-    }
-
-    unsafe fn invoke_method_object(
-        &self,
-        name: &str,
-        args: Vec<VariantValue>,
-    ) -> Result<ComObject> {
+    unsafe fn invoke_method(&self, name: &str, args: Vec<VariantValue>) -> Result<ComObject> {
         let result = self.invoke_raw(name, DISPATCH_METHOD, args)?;
 
-        variant_to_dispatch(result)
-            .with_context(|| format!("COM 메서드 결과가 IDispatch 객체가 아닙니다: {name}"))
+        if variant_is_empty(&result) {
+            Ok(self.clone())
+        } else {
+            variant_to_dispatch(result)
+                .ok_or_else(|| anyhow::anyhow!("COM 메서드 반환값이 IDispatch가 아닙니다: {name}"))
+        }
     }
 
     unsafe fn invoke_raw(
@@ -283,4 +309,8 @@ unsafe fn variant_to_dispatch(mut variant: VARIANT) -> Option<ComObject> {
     )?;
 
     Some(ComObject { dispatch })
+}
+
+unsafe fn variant_is_empty(variant: &VARIANT) -> bool {
+    (*variant.Anonymous.Anonymous).vt == VT_EMPTY
 }
