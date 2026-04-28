@@ -10,14 +10,12 @@ use windows::Win32::System::Com::{
     DISPID_PROPERTYPUT, DISPPARAMS, EXCEPINFO, IDispatch, CLSCTX_LOCAL_SERVER,
     COINIT_APARTMENTTHREADED,
 };
-
 use windows::Win32::System::Variant::{
     VariantClear, VARIANT, VT_BOOL, VT_BSTR, VT_DISPATCH, VT_EMPTY, VT_I4,
 };
 
 const LCID_SYSTEM_DEFAULT: u32 = 0x0800;
 const WD_FORMAT_XML_DOCUMENT: i32 = 16;
-const DISPID_PROPERTYPUT_VALUE: i32 = -3;
 
 pub fn convert_doc_to_docx(src: &Path, dst: &Path) -> Result<()> {
     let src = std::fs::canonicalize(src)
@@ -32,7 +30,6 @@ pub fn convert_doc_to_docx(src: &Path, dst: &Path) -> Result<()> {
 
     unsafe {
         let _com = ComApartment::init()?;
-
         let word = create_word_application()?;
 
         let result = (|| -> Result<()> {
@@ -173,7 +170,7 @@ impl ComObject {
             .map(|value| value.into_variant())
             .collect();
 
-        let mut named_arg = DISPID_PROPERTYPUT_VALUE;
+        let mut named_arg = DISPID_PROPERTYPUT;
 
         let mut disp_params = DISPPARAMS {
             rgvarg: if variants.is_empty() {
@@ -227,7 +224,6 @@ impl VariantValue {
 
         match self {
             VariantValue::Bstr(value) => {
-                // ✅ 수정: (*...) 로 ManuallyDrop 명시적 역참조
                 (*variant.Anonymous.Anonymous).vt = VT_BSTR;
                 (*variant.Anonymous.Anonymous).Anonymous.bstrVal =
                     ManuallyDrop::new(BSTR::from(value));
@@ -248,21 +244,20 @@ impl VariantValue {
 }
 
 unsafe fn variant_to_dispatch(mut variant: VARIANT) -> Option<ComObject> {
-    let vt = (*variant.Anonymous.Anonymous).vt; // ✅ 수정
+    let vt = (*variant.Anonymous.Anonymous).vt;
 
     if vt != VT_DISPATCH {
         let _ = VariantClear(&mut variant);
         return None;
     }
 
-    // ✅ 수정: ManuallyDrop::take 대상도 명시적 역참조
     let dispatch = ManuallyDrop::take(
-        &mut (*variant.Anonymous.Anonymous).Anonymous.pdispVal
+        &mut (*variant.Anonymous.Anonymous).Anonymous.pdispVal,
     )?;
 
     Some(ComObject { dispatch })
 }
 
 unsafe fn variant_is_empty(variant: &VARIANT) -> bool {
-    (*variant.Anonymous.Anonymous).vt == VT_EMPTY // ✅ 수정
+    (*variant.Anonymous.Anonymous).vt == VT_EMPTY
 }
