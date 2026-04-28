@@ -474,25 +474,41 @@ fn emit_rich_paragraph(
     if !ppr.is_empty() {
         body.push_str(ppr);
     }
+
     match op {
         ParaOp::Equal { .. } if !source.runs.is_empty() => {
             for r in &source.runs {
-                body.push_str(r#"<w:r>"#);
-                if !r.rpr_xml.is_empty() {
-                    body.push_str(&r.rpr_xml);
-                }
-                body.push_str(&format!(
-                    r#"<w:t xml:space="preserve">{}</w:t></w:r>"#,
-                    xml_escape(&r.text)
-                ));
+                emit_original_run(body, r);
             }
         }
-        _ => {
-            body.push_str(&del_wrap(del_run(&source.text, Some(COLOR_DELETE)), rev.next(), opts));
-            body.push_str(&ins_wrap(run(&source.text, Some(COLOR_INSERT)), rev.next(), opts));
+        ParaOp::Modified { changes } => {
+            for ch in changes {
+                match ch.kind {
+                    ChangeKind::Equal => body.push_str(&run(&ch.text, None)),
+                    ChangeKind::Insert => {
+                        body.push_str(&styled_run(&ch.text, COLOR_INSERT, RunStyle::Underline));
+                    }
+                    ChangeKind::Delete => {
+                        body.push_str(&styled_run(&ch.text, COLOR_DELETE, RunStyle::Strike));
+                    }
+                }
+            }
         }
+        _ => emit_para_op(body, op, rev, opts),
     }
+
     body.push_str("</w:p>");
+}
+
+fn emit_original_run(body: &mut String, r: &compare_core::RichRun) {
+    body.push_str(r#"<w:r>"#);
+    if !r.rpr_xml.is_empty() {
+        body.push_str(&r.rpr_xml);
+    }
+    body.push_str(&format!(
+        r#"<w:t xml:space="preserve">{}</w:t></w:r>"#,
+        xml_escape(&r.text)
+    ));
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
