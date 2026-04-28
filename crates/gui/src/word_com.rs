@@ -5,12 +5,14 @@ use std::path::Path;
 use windows::core::{w, BSTR, GUID, PCWSTR};
 use windows::Win32::Foundation::VARIANT_BOOL;
 use windows::Win32::System::Com::{
-    CLSIDFromProgID, CoCreateInstance, CoInitializeEx, CoUninitialize, DISPATCH_FLAGS,
-    DISPATCH_METHOD, DISPATCH_PROPERTYGET, DISPATCH_PROPERTYPUT, DISPPARAMS, EXCEPINFO,
-    IDispatch, CLSCTX_LOCAL_SERVER, COINIT_APARTMENTTHREADED, VARIANT,
+    CLSIDFromProgID, CoCreateInstance, CoInitializeEx, CoUninitialize,
+    DISPATCH_FLAGS, DISPATCH_METHOD, DISPATCH_PROPERTYGET, DISPATCH_PROPERTYPUT,
+    DISPPARAMS, EXCEPINFO, IDispatch, CLSCTX_LOCAL_SERVER,
+    COINIT_APARTMENTTHREADED,
 };
+
 use windows::Win32::System::Variant::{
-    VariantClear, VT_BOOL, VT_BSTR, VT_DISPATCH, VT_EMPTY, VT_I4,
+    VARIANT, VariantClear, VT_BOOL, VT_BSTR, VT_DISPATCH, VT_EMPTY, VT_I4,
 };
 
 const LCID_SYSTEM_DEFAULT: u32 = 0x0800;
