@@ -1,19 +1,21 @@
 use anyhow::{Context, Result};
 use std::mem::ManuallyDrop;
 use std::path::Path;
-use windows::core::{w, BSTR, GUID, PWSTR};
+
+use windows::core::{w, BSTR, GUID, PCWSTR};
 use windows::Win32::Foundation::VARIANT_BOOL;
 use windows::Win32::System::Com::{
-    CLSIDFromProgID, CoCreateInstance, CoInitializeEx, CoUninitialize, DISPATCH_METHOD,
-    DISPATCH_PROPERTYGET, DISPATCH_PROPERTYPUT, DISPID_PROPERTYPUT, DISPPARAMS, EXCEPINFO,
-    IDispatch, CLSCTX_LOCAL_SERVER, COINIT_APARTMENTTHREADED,
+    CLSIDFromProgID, CoCreateInstance, CoInitializeEx, CoUninitialize, DISPATCH_FLAGS,
+    DISPATCH_METHOD, DISPATCH_PROPERTYGET, DISPATCH_PROPERTYPUT, DISPPARAMS, EXCEPINFO,
+    IDispatch, CLSCTX_LOCAL_SERVER, COINIT_APARTMENTTHREADED, VARIANT,
 };
 use windows::Win32::System::Variant::{
-    VariantClear, VARIANT, VT_BOOL, VT_BSTR, VT_DISPATCH, VT_EMPTY, VT_I4,
+    VariantClear, VT_BOOL, VT_BSTR, VT_DISPATCH, VT_EMPTY, VT_I4,
 };
 
 const LCID_SYSTEM_DEFAULT: u32 = 0x0800;
 const WD_FORMAT_XML_DOCUMENT: i32 = 16;
+const DISPID_PROPERTYPUT_VALUE: i32 = -3;
 
 pub fn convert_doc_to_docx(src: &Path, dst: &Path) -> Result<()> {
     let src = std::fs::canonicalize(src)
@@ -68,7 +70,10 @@ pub fn convert_doc_to_docx(src: &Path, dst: &Path) -> Result<()> {
     }
 
     if !dst.exists() {
-        anyhow::bail!("DOCX 변환은 실행됐지만 결과 파일이 생성되지 않았습니다: {}", dst.display());
+        anyhow::bail!(
+            "DOCX 변환은 실행됐지만 결과 파일이 생성되지 않았습니다: {}",
+            dst.display()
+        );
     }
 
     Ok(())
@@ -79,7 +84,9 @@ struct ComApartment;
 impl ComApartment {
     unsafe fn init() -> Result<Self> {
         CoInitializeEx(None, COINIT_APARTMENTTHREADED)
+            .ok()
             .context("COM 초기화 실패")?;
+
         Ok(Self)
     }
 }
@@ -109,14 +116,16 @@ struct ComObject {
 
 impl ComObject {
     unsafe fn get_dispid(&self, name: &str) -> Result<i32> {
-        let mut wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
-        let mut name_ptr = PWSTR(wide.as_mut_ptr());
+        let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+        let name_pcw = PCWSTR(wide.as_ptr());
+        let names = [name_pcw];
+
         let mut dispid = 0i32;
 
         self.dispatch
             .GetIDsOfNames(
                 &GUID::zeroed(),
-                &mut name_ptr,
+                names.as_ptr(),
                 1,
                 LCID_SYSTEM_DEFAULT,
                 &mut dispid,
@@ -144,14 +153,14 @@ impl ComObject {
         if variant_is_empty(&result) {
             Ok(self.clone())
         } else {
-            variant_to_dispatch(result).unwrap_or_else(|| self.clone())
+            Ok(variant_to_dispatch(result).unwrap_or_else(|| self.clone()))
         }
     }
 
     unsafe fn invoke_raw(
         &self,
         name: &str,
-        flags: windows::Win32::System::Com::DISPATCH_FLAGS,
+        flags: DISPATCH_FLAGS,
         args: Vec<VariantValue>,
     ) -> Result<VARIANT> {
         let dispid = self.get_dispid(name)?;
@@ -162,7 +171,7 @@ impl ComObject {
             .map(|value| value.into_variant())
             .collect();
 
-        let mut named_arg = DISPID_PROPERTYPUT;
+        let mut named_arg = DISPID_PROPERTYPUT_VALUE;
 
         let mut disp_params = DISPPARAMS {
             rgvarg: if variants.is_empty() {
@@ -190,8 +199,8 @@ impl ComObject {
             flags,
             &mut disp_params,
             &mut result,
-            &mut excepinfo,
-            &mut arg_err,
+            Some(&mut excepinfo),
+            Some(&mut arg_err),
         );
 
         for variant in variants.iter_mut() {
