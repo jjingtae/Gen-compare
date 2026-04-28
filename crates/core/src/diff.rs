@@ -1,4 +1,9 @@
 //! Two-level diff: paragraph alignment + word-level within matched pairs.
+//!
+//! This version is tuned for legal-document comparison:
+//! - Move detection is disabled to avoid noisy false "moved" paragraphs.
+//! - Paragraph replacement pairing prefers legal clause/list markers.
+//! - Word-level diff still preserves whitespace/punctuation tokens.
 
 use serde::Serialize;
 use similar::{ChangeTag, DiffOp, TextDiff};
@@ -29,10 +34,9 @@ pub enum ParaOp {
     Delete { text: String },
     /// Paragraph present in both but content changed — word-level diff inside.
     Modified { changes: Vec<Change> },
-    /// Original location of a paragraph that was moved to a new position.
-    /// `move_id` pairs it with the matching MovedTo.
+    /// Disabled in current matching strategy, but retained for API compatibility.
     MovedFrom { text: String, move_id: u32 },
-    /// New location of a paragraph that was moved from elsewhere.
+    /// Disabled in current matching strategy, but retained for API compatibility.
     MovedTo { text: String, move_id: u32 },
 }
 
@@ -57,71 +61,6 @@ pub fn diff_words(old: &str, new: &str) -> Vec<Change> {
     out
 }
 
-/// Minimum similarity ratio for a Delete+Insert pair to be reclassified
-/// as a Move. Tuned conservatively — only very close matches are treated
-/// as moves, so we never fabricate a move where two paragraphs happen to
-/// share common words.
-const MOVE_THRESHOLD: f32 = 0.85;
-
-/// Scan the op list for Delete/Insert pairs whose content is ~identical and
-/// convert them into MovedFrom/MovedTo pairs sharing a move_id.
-fn detect_moves(ops: Vec<ParaOp>) -> Vec<ParaOp> {
-    // Collect indices of Deletes and Inserts.
-    let mut del_idx: Vec<usize> = Vec::new();
-    let mut ins_idx: Vec<usize> = Vec::new();
-    for (i, op) in ops.iter().enumerate() {
-        match op {
-            ParaOp::Delete { .. } => del_idx.push(i),
-            ParaOp::Insert { .. } => ins_idx.push(i),
-            _ => {}
-        }
-    }
-    if del_idx.is_empty() || ins_idx.is_empty() {
-        return ops;
-    }
-
-    // Greedy matching: for each Delete, find the best unmatched Insert.
-    // O(D*I) but D and I are small (paragraphs added/removed, not entire doc).
-    let mut out = ops;
-    let mut used_ins = vec![false; ins_idx.len()];
-    let mut next_move_id: u32 = 1;
-
-    for &di in &del_idx {
-        let del_text = match &out[di] {
-            ParaOp::Delete { text } => text.clone(),
-            _ => continue,
-        };
-        let mut best: Option<(usize, f32)> = None;
-        for (k, &ii) in ins_idx.iter().enumerate() {
-            if used_ins[k] {
-                continue;
-            }
-            let ins_text = match &out[ii] {
-                ParaOp::Insert { text } => text,
-                _ => continue,
-            };
-            let s = similarity(&del_text, ins_text);
-            if s >= MOVE_THRESHOLD && best.map_or(true, |(_, bs)| s > bs) {
-                best = Some((k, s));
-            }
-        }
-        if let Some((k, _)) = best {
-            used_ins[k] = true;
-            let ii = ins_idx[k];
-            let move_id = next_move_id;
-            next_move_id += 1;
-            // Preserve original text from each side.
-            if let (ParaOp::Delete { text: dt }, ParaOp::Insert { text: it }) =
-                (out[di].clone(), out[ii].clone())
-            {
-                out[di] = ParaOp::MovedFrom { text: dt, move_id };
-                out[ii] = ParaOp::MovedTo { text: it, move_id };
-            }
-        }
-    }
-    out
-}
-
 /// Two-level diff: align paragraphs first, then diff words inside matched pairs.
 pub fn diff_paragraphs(old: &[String], new: &[String]) -> Vec<ParaOp> {
     let old_refs: Vec<&str> = old.iter().map(String::as_str).collect();
@@ -133,17 +72,23 @@ pub fn diff_paragraphs(old: &[String], new: &[String]) -> Vec<ParaOp> {
         match *op {
             DiffOp::Equal { old_index, len, .. } => {
                 for i in 0..len {
-                    out.push(ParaOp::Equal { text: old[old_index + i].clone() });
+                    out.push(ParaOp::Equal {
+                        text: old[old_index + i].clone(),
+                    });
                 }
             }
             DiffOp::Insert { new_index, new_len, .. } => {
                 for i in 0..new_len {
-                    out.push(ParaOp::Insert { text: new[new_index + i].clone() });
+                    out.push(ParaOp::Insert {
+                        text: new[new_index + i].clone(),
+                    });
                 }
             }
             DiffOp::Delete { old_index, old_len, .. } => {
                 for i in 0..old_len {
-                    out.push(ParaOp::Delete { text: old[old_index + i].clone() });
+                    out.push(ParaOp::Delete {
+                        text: old[old_index + i].clone(),
+                    });
                 }
             }
             DiffOp::Replace {
@@ -152,92 +97,104 @@ pub fn diff_paragraphs(old: &[String], new: &[String]) -> Vec<ParaOp> {
                 new_index,
                 new_len,
             } => {
-                // Pair up overlapping positions. For each pair, check similarity:
-                // if too low, prefer Delete+Insert over forcing a Modified pairing.
-                let paired = old_len.min(new_len);
-                for i in 0..paired {
-                    let o = &old[old_index + i];
-                    let n = &new[new_index + i];
-                    if should_pair_as_modified(o, n) {
-                        out.push(ParaOp::Modified { changes: diff_words(o, n) });
-                    } else {
-                        out.push(ParaOp::Delete { text: o.clone() });
-                        out.push(ParaOp::Insert { text: n.clone() });
-                    }
-                }
-                for i in paired..old_len {
-                    out.push(ParaOp::Delete { text: old[old_index + i].clone() });
-                }
-                for i in paired..new_len {
-                    out.push(ParaOp::Insert { text: new[new_index + i].clone() });
-                }
+                emit_clause_aware_replace(
+                    &old[old_index..old_index + old_len],
+                    &new[new_index..new_index + new_len],
+                    &mut out,
+                );
             }
         }
     }
-    // Move detection is intentionally disabled for legal-document comparison.
+
+    // Intentionally do NOT run move detection.
+    // Legal redlines become much noisier when repeated boilerplate paragraphs
+    // are incorrectly classified as moves.
     out
 }
 
-/// Minimum word-level similarity for two paragraphs to be considered a "Modified pair"
-/// rather than a clean Delete+Insert. Tuned empirically: above ~0.35 the word-level
-/// redline stays readable; below that the cost of showing inline diff exceeds the
-/// benefit of side-by-side matching.
-const SIMILARITY_THRESHOLD: f32 = 0.25;
+/// Minimum similarity for two paragraphs to be treated as a modified pair.
+const SIMILARITY_THRESHOLD: f32 = 0.42;
 
+/// Stronger threshold when no legal clause/list key matches.
+const WEAK_PAIR_THRESHOLD: f32 = 0.58;
 
-fn should_pair_as_modified(a: &str, b: &str) -> bool {
-    if same_legal_anchor(a, b) {
-        return true;
+fn emit_clause_aware_replace(old_slice: &[String], new_slice: &[String], out: &mut Vec<ParaOp>) {
+    if old_slice.is_empty() {
+        for n in new_slice {
+            out.push(ParaOp::Insert { text: n.clone() });
+        }
+        return;
     }
-    similarity(a, b) >= SIMILARITY_THRESHOLD
-}
+    if new_slice.is_empty() {
+        for o in old_slice {
+            out.push(ParaOp::Delete { text: o.clone() });
+        }
+        return;
+    }
 
-fn same_legal_anchor(a: &str, b: &str) -> bool {
-    match (legal_anchor(a), legal_anchor(b)) {
-        (Some(x), Some(y)) => x == y,
-        _ => false,
-    }
-}
+    let mut used_new = vec![false; new_slice.len()];
 
-fn legal_anchor(s: &str) -> Option<String> {
-    let t = s.trim_start();
-    if t.is_empty() { return None; }
-    if let Some(rest) = t.strip_prefix('제') {
-        let mut digits = String::new();
-        let mut saw_jo = false;
-        for ch in rest.chars() {
-            if ch.is_ascii_digit() { digits.push(ch); }
-            else if ch == '조' { saw_jo = true; break; }
-            else if ch.is_whitespace() { continue; }
-            else { break; }
+    for old_text in old_slice {
+        let mut best: Option<(usize, f32)> = None;
+        let old_key = legal_anchor_key(old_text);
+
+        for (j, new_text) in new_slice.iter().enumerate() {
+            if used_new[j] {
+                continue;
+            }
+
+            let new_key = legal_anchor_key(new_text);
+            let sim = similarity(old_text, new_text);
+
+            let score = if !old_key.is_empty() && old_key == new_key {
+                // Same clause/list marker: strongly prefer pairing these.
+                sim + 0.35
+            } else if !old_key.is_empty() && !new_key.is_empty() && old_key != new_key {
+                // Different legal markers should usually not be paired.
+                sim - 0.25
+            } else {
+                sim
+            };
+
+            if best.map_or(true, |(_, best_score)| score > best_score) {
+                best = Some((j, score));
+            }
         }
-        if saw_jo && !digits.is_empty() { return Some(format!("article:{}", digits)); }
-    }
-    let mut chars = t.chars();
-    let first = chars.next()?;
-    if first == '(' {
-        let mut inner = String::new();
-        for ch in chars {
-            if ch == ')' { break; }
-            if ch.is_ascii_digit() { inner.push(ch); } else { return None; }
+
+        if let Some((j, score)) = best {
+            let base_sim = similarity(old_text, &new_slice[j]);
+            let old_key = legal_anchor_key(old_text);
+            let new_key = legal_anchor_key(&new_slice[j]);
+            let key_match = !old_key.is_empty() && old_key == new_key;
+
+            if key_match || score >= WEAK_PAIR_THRESHOLD || base_sim >= SIMILARITY_THRESHOLD {
+                used_new[j] = true;
+                if old_text == &new_slice[j] {
+                    out.push(ParaOp::Equal { text: old_text.clone() });
+                } else {
+                    out.push(ParaOp::Modified {
+                        changes: diff_words(old_text, &new_slice[j]),
+                    });
+                }
+            } else {
+                out.push(ParaOp::Delete {
+                    text: old_text.clone(),
+                });
+            }
+        } else {
+            out.push(ParaOp::Delete {
+                text: old_text.clone(),
+            });
         }
-        if !inner.is_empty() { return Some(format!("paren:{}", inner)); }
     }
-    if first.is_ascii_digit() {
-        let mut num = first.to_string();
-        for ch in chars {
-            if ch.is_ascii_digit() { num.push(ch); }
-            else if ch == '.' || ch == ')' || ch.is_whitespace() { return Some(format!("num:{}", num)); }
-            else { break; }
+
+    for (j, new_text) in new_slice.iter().enumerate() {
+        if !used_new[j] {
+            out.push(ParaOp::Insert {
+                text: new_text.clone(),
+            });
         }
     }
-    if ('①'..='⑳').contains(&first) { return Some(format!("circled:{}", first)); }
-    if ('가'..='하').contains(&first) {
-        if let Some(ch) = chars.next() {
-            if ch == '.' || ch == ')' || ch.is_whitespace() || ch == '\t' { return Some(format!("korean:{}", first)); }
-        }
-    }
-    None
 }
 
 fn similarity(a: &str, b: &str) -> f32 {
@@ -246,8 +203,145 @@ fn similarity(a: &str, b: &str) -> f32 {
     }
     let at = crate::token::tokenize_words(a);
     let bt = crate::token::tokenize_words(b);
-    let d = TextDiff::from_slices(&at, &bt);
-    d.ratio()
+    TextDiff::from_slices(&at, &bt).ratio()
+}
+
+/// Extracts a conservative legal-document anchor from the beginning of a paragraph.
+/// Examples:
+/// - "제 1 조 (용어의 정의)" -> "article:1"
+/// - "(1) ..." -> "paren:1"
+/// - "1. ..." -> "num:1"
+/// - "가. ..." -> "kor:가"
+/// - "① ..." -> "circle:①"
+fn legal_anchor_key(text: &str) -> String {
+    let t = text.trim_start();
+    if t.is_empty() {
+        return String::new();
+    }
+
+    if let Some(k) = article_key(t) {
+        return k;
+    }
+    if let Some(k) = parenthesized_number_key(t) {
+        return k;
+    }
+    if let Some(k) = dotted_number_key(t) {
+        return k;
+    }
+    if let Some(k) = korean_list_key(t) {
+        return k;
+    }
+    if let Some(k) = circled_number_key(t) {
+        return k;
+    }
+
+    String::new()
+}
+
+fn article_key(t: &str) -> Option<String> {
+    let chars: Vec<char> = t.chars().collect();
+    if chars.first().copied()? != '제' {
+        return None;
+    }
+
+    let mut i = 1usize;
+    while i < chars.len() && chars[i].is_whitespace() {
+        i += 1;
+    }
+
+    let start = i;
+    while i < chars.len() && (chars[i].is_ascii_digit() || is_korean_number_char(chars[i])) {
+        i += 1;
+    }
+
+    if i == start {
+        return None;
+    }
+
+    while i < chars.len() && chars[i].is_whitespace() {
+        i += 1;
+    }
+
+    if i < chars.len() && chars[i] == '조' {
+        let n: String = chars[start..i].iter().collect();
+        return Some(format!("article:{n}"));
+    }
+
+    None
+}
+
+fn parenthesized_number_key(t: &str) -> Option<String> {
+    let chars: Vec<char> = t.chars().collect();
+    if chars.first().copied()? != '(' {
+        return None;
+    }
+
+    let mut i = 1usize;
+    let start = i;
+    while i < chars.len() && chars[i].is_ascii_digit() {
+        i += 1;
+    }
+
+    if i == start {
+        return None;
+    }
+
+    if i < chars.len() && chars[i] == ')' {
+        let n: String = chars[start..i].iter().collect();
+        return Some(format!("paren:{n}"));
+    }
+
+    None
+}
+
+fn dotted_number_key(t: &str) -> Option<String> {
+    let chars: Vec<char> = t.chars().collect();
+    let mut i = 0usize;
+
+    while i < chars.len() && chars[i].is_ascii_digit() {
+        i += 1;
+    }
+
+    if i == 0 {
+        return None;
+    }
+
+    if i < chars.len() && (chars[i] == '.' || chars[i] == '．') {
+        let n: String = chars[..i].iter().collect();
+        return Some(format!("num:{n}"));
+    }
+
+    None
+}
+
+fn korean_list_key(t: &str) -> Option<String> {
+    let mut chars = t.chars();
+    let first = chars.next()?;
+    let second = chars.next();
+
+    if matches!(first, '가' | '나' | '다' | '라' | '마' | '바' | '사' | '아' | '자' | '차' | '카' | '타' | '파' | '하')
+        && matches!(second, Some('.') | Some('．') | Some(')'))
+    {
+        return Some(format!("kor:{first}"));
+    }
+
+    None
+}
+
+fn circled_number_key(t: &str) -> Option<String> {
+    let first = t.chars().next()?;
+    if ('①'..='⑳').contains(&first) {
+        return Some(format!("circle:{first}"));
+    }
+    None
+}
+
+fn is_korean_number_char(c: char) -> bool {
+    matches!(
+        c,
+        '영' | '공' | '일' | '이' | '삼' | '사' | '오' | '육' | '륙' | '칠' | '팔' | '구'
+            | '십' | '백' | '천' | '만'
+    )
 }
 
 fn push_or_extend(out: &mut Vec<Change>, kind: ChangeKind, token: &str) {
@@ -257,7 +351,10 @@ fn push_or_extend(out: &mut Vec<Change>, kind: ChangeKind, token: &str) {
             return;
         }
     }
-    out.push(Change { kind, text: token.to_string() });
+    out.push(Change {
+        kind,
+        text: token.to_string(),
+    });
 }
 
 #[cfg(test)]
@@ -298,9 +395,18 @@ mod tests {
 
     #[test]
     fn para_modified() {
-        let old = vec!["hello world".to_string()];
-        let new = vec!["hello rust".to_string()];
+        let old = vec!["제 1 조 (정의) hello world".to_string()];
+        let new = vec!["제 1 조 (정의) hello rust".to_string()];
         let ops = diff_paragraphs(&old, &new);
         assert!(matches!(ops[0], ParaOp::Modified { .. }));
+    }
+
+    #[test]
+    fn anchor_keys() {
+        assert_eq!(legal_anchor_key("제 1 조 (정의)"), "article:1");
+        assert_eq!(legal_anchor_key("(2) 내용"), "paren:2");
+        assert_eq!(legal_anchor_key("14. 내용"), "num:14");
+        assert_eq!(legal_anchor_key("가. 내용"), "kor:가");
+        assert_eq!(legal_anchor_key("① 내용"), "circle:①");
     }
 }
