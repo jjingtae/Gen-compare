@@ -13,7 +13,7 @@
 
 use anyhow::Result;
 use compare_core::{
-    stats_of_blocks, BlockOp, CellOp, ChangeKind, ParaOp, RowOp, Stats, TableRow,
+    stats_of_blocks, BlockOp, CellOp, Change, ChangeKind, ParaOp, RowOp, Stats, TableRow,
 };
 use std::fs::File;
 use std::io::Write;
@@ -482,17 +482,7 @@ fn emit_rich_paragraph(
             }
         }
         ParaOp::Modified { changes } => {
-            for ch in changes {
-                match ch.kind {
-                    ChangeKind::Equal => body.push_str(&run(&ch.text, None)),
-                    ChangeKind::Insert => {
-                        body.push_str(&styled_run(&ch.text, COLOR_INSERT, RunStyle::Underline));
-                    }
-                    ChangeKind::Delete => {
-                        body.push_str(&styled_run(&ch.text, COLOR_DELETE, RunStyle::Strike));
-                    }
-                }
-            }
+            emit_modified_paragraph_preserving_runs(body, changes, source, opts);
         }
         _ => emit_para_op(body, op, rev, opts),
     }
@@ -501,14 +491,175 @@ fn emit_rich_paragraph(
 }
 
 fn emit_original_run(body: &mut String, r: &compare_core::RichRun) {
-    body.push_str(r#"<w:r>"#);
-    if !r.rpr_xml.is_empty() {
-        body.push_str(&r.rpr_xml);
+    emit_run_with_rpr(body, &r.text, &r.rpr_xml, false);
+}
+
+fn emit_modified_paragraph_preserving_runs(
+    body: &mut String,
+    changes: &[Change],
+    source: &compare_core::RichParagraph,
+    _opts: &RedlineOptions,
+) {
+    let mut cursor = RunCursor::new(&source.runs);
+    let mut last_rpr: Option<String> = source
+        .runs
+        .iter()
+        .find(|r| !r.rpr_xml.is_empty())
+        .map(|r| r.rpr_xml.clone());
+
+    for ch in changes {
+        match ch.kind {
+            ChangeKind::Equal => {
+                let pieces = cursor.consume(&ch.text);
+                if pieces.is_empty() {
+                    body.push_str(&run(&ch.text, None));
+                } else {
+                    for piece in pieces {
+                        if !piece.rpr_xml.is_empty() {
+                            last_rpr = Some(piece.rpr_xml.clone());
+                        }
+                        emit_run_with_rpr(body, &piece.text, &piece.rpr_xml, false);
+                    }
+                }
+            }
+            ChangeKind::Delete => {
+                let pieces = cursor.consume(&ch.text);
+                if pieces.is_empty() {
+                    body.push_str(&styled_run(&ch.text, COLOR_DELETE, RunStyle::Strike));
+                } else {
+                    for piece in pieces {
+                        let rpr = merge_rpr(&piece.rpr_xml, Some(COLOR_DELETE), Some(RunStyle::Strike));
+                        emit_run_with_rpr(body, &piece.text, &rpr, false);
+                    }
+                }
+            }
+            ChangeKind::Insert => {
+                let inherited = last_rpr.as_deref().unwrap_or("");
+                let rpr = merge_rpr(inherited, Some(COLOR_INSERT), Some(RunStyle::Underline));
+                emit_run_with_rpr(body, &ch.text, &rpr, false);
+            }
+        }
     }
-    body.push_str(&format!(
-        r#"<w:t xml:space="preserve">{}</w:t></w:r>"#,
-        xml_escape(&r.text)
-    ));
+}
+
+#[derive(Clone)]
+struct RunPiece {
+    rpr_xml: String,
+    text: String,
+}
+
+struct RunCursor<'a> {
+    runs: &'a [compare_core::RichRun],
+    run_idx: usize,
+    byte_idx: usize,
+}
+
+impl<'a> RunCursor<'a> {
+    fn new(runs: &'a [compare_core::RichRun]) -> Self {
+        Self { runs, run_idx: 0, byte_idx: 0 }
+    }
+
+    fn consume(&mut self, wanted: &str) -> Vec<RunPiece> {
+        let mut remaining = wanted;
+        let mut out = Vec::new();
+        while !remaining.is_empty() && self.run_idx < self.runs.len() {
+            let run = &self.runs[self.run_idx];
+            if self.byte_idx >= run.text.len() {
+                self.run_idx += 1;
+                self.byte_idx = 0;
+                continue;
+            }
+            let available = &run.text[self.byte_idx..];
+            let take_len = common_prefix_len(available, remaining);
+            if take_len == 0 {
+                self.run_idx += 1;
+                self.byte_idx = 0;
+                continue;
+            }
+            out.push(RunPiece {
+                rpr_xml: run.rpr_xml.clone(),
+                text: available[..take_len].to_string(),
+            });
+            self.byte_idx += take_len;
+            remaining = &remaining[take_len..];
+        }
+        out
+    }
+}
+
+fn common_prefix_len(a: &str, b: &str) -> usize {
+    let mut len = 0;
+    let mut ai = a.chars();
+    let mut bi = b.chars();
+    loop {
+        match (ai.next(), bi.next()) {
+            (Some(ac), Some(bc)) if ac == bc => len += ac.len_utf8(),
+            _ => break,
+        }
+    }
+    len
+}
+
+fn emit_run_with_rpr(body: &mut String, text: &str, rpr_xml: &str, del_text: bool) {
+    if text.is_empty() && rpr_xml.is_empty() {
+        return;
+    }
+    body.push_str("<w:r>");
+    if !rpr_xml.is_empty() {
+        body.push_str(rpr_xml);
+    }
+    emit_text_nodes(body, text, del_text);
+    body.push_str("</w:r>");
+}
+
+fn emit_text_nodes(out: &mut String, text: &str, del_text: bool) {
+    let mut buf = String::new();
+    let tag = if del_text { "w:delText" } else { "w:t" };
+    for ch in text.chars() {
+        match ch {
+            '\t' => {
+                flush_text_node(out, &mut buf, tag);
+                out.push_str("<w:tab/>");
+            }
+            '\n' | '\r' => {
+                flush_text_node(out, &mut buf, tag);
+                out.push_str("<w:br/>");
+            }
+            _ => buf.push(ch),
+        }
+    }
+    flush_text_node(out, &mut buf, tag);
+}
+
+fn flush_text_node(out: &mut String, buf: &mut String, tag: &str) {
+    if !buf.is_empty() {
+        out.push_str(&format!(
+            r#"<{tag} xml:space="preserve">{}</{tag}>"#,
+            xml_escape(buf)
+        ));
+        buf.clear();
+    }
+}
+
+fn merge_rpr(base: &str, color: Option<&str>, style: Option<RunStyle>) -> String {
+    let mut inner = String::new();
+    if let Some(start) = base.find('>') {
+        if let Some(end) = base.rfind("</w:rPr>") {
+            inner.push_str(&base[start + 1..end]);
+        }
+    }
+    if let Some(hex) = color {
+        inner.push_str(&format!(r#"<w:color w:val="{}"/>"#, hex));
+    }
+    if let Some(style) = style {
+        inner.push_str(match style {
+            RunStyle::Underline => r#"<w:u w:val="single"/>"#,
+            RunStyle::DoubleUnderline => r#"<w:u w:val="double"/>"#,
+            RunStyle::Strike => r#"<w:strike/>"#,
+            RunStyle::DoubleStrike => r#"<w:dstrike/>"#,
+        });
+    }
+    if inner.is_empty() { String::new() } else { format!("<w:rPr>{}</w:rPr>", inner) }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -836,16 +987,10 @@ enum RunStyle {
 }
 
 fn styled_run(text: &str, color: &str, style: RunStyle) -> String {
-    let tag = match style {
-        RunStyle::Underline => r#"<w:u w:val="single"/>"#,
-        RunStyle::DoubleUnderline => r#"<w:u w:val="double"/>"#,
-        RunStyle::Strike => r#"<w:strike/>"#,
-        RunStyle::DoubleStrike => r#"<w:dstrike/>"#,
-    };
-    format!(
-        r#"<w:r><w:rPr><w:color w:val="{}"/>{}</w:rPr><w:t xml:space="preserve">{}</w:t></w:r>"#,
-        color, tag, xml_escape(text)
-    )
+    let rpr = merge_rpr("", Some(color), Some(style));
+    let mut out = String::new();
+    emit_run_with_rpr(&mut out, text, &rpr, false);
+    out
 }
 
 // Legacy single-author wraps are kept only as thin shims over the per-change
@@ -859,19 +1004,17 @@ fn del_wrap(inner: String, id: u32, opts: &RedlineOptions) -> String {
 }
 
 fn run(text: &str, color: Option<&str>) -> String {
-    format!(
-        r#"<w:r>{}<w:t xml:space="preserve">{}</w:t></w:r>"#,
-        rpr(color),
-        xml_escape(text)
-    )
+    let mut out = String::new();
+    let rpr = rpr(color);
+    emit_run_with_rpr(&mut out, text, &rpr, false);
+    out
 }
 
 fn del_run(text: &str, color: Option<&str>) -> String {
-    format!(
-        r#"<w:r>{}<w:delText xml:space="preserve">{}</w:delText></w:r>"#,
-        rpr(color),
-        xml_escape(text)
-    )
+    let mut out = String::new();
+    let rpr = rpr(color);
+    emit_run_with_rpr(&mut out, text, &rpr, true);
+    out
 }
 
 fn rpr(color: Option<&str>) -> String {
@@ -880,7 +1023,6 @@ fn rpr(color: Option<&str>) -> String {
         None => String::new(),
     }
 }
-
 fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")

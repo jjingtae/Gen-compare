@@ -6,7 +6,7 @@ use serde::Serialize;
 use similar::{DiffOp, TextDiff};
 
 use crate::block::{Block, RichParagraph, TableRow};
-use crate::diff::{diff_paragraphs, diff_words, Change, ParaOp};
+use crate::diff::{diff_paragraphs, diff_words, Change, ChangeKind, ParaOp};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -224,7 +224,14 @@ fn emit_replace(olds: &[Block], news: &[Block], out: &mut Vec<BlockOp>) {
                 ParaOp::Insert { text } | ParaOp::MovedTo { text, .. } => {
                     find_rich(&new_rich, text)
                 }
-                ParaOp::Modified { .. } => RichParagraph::default(),
+                ParaOp::Modified { changes } => {
+                    let old_text: String = changes
+                        .iter()
+                        .filter(|c| c.kind != ChangeKind::Insert)
+                        .map(|c| c.text.as_str())
+                        .collect();
+                    find_best_rich(&old_rich, &old_text)
+                },
             };
             out.push(BlockOp::Para { op, source });
         }
@@ -278,6 +285,20 @@ fn partition_by_kind(blocks: &[Block]) -> (Vec<RichParagraph>, Vec<(Vec<TableRow
 
 fn find_rich(list: &[RichParagraph], text: &str) -> RichParagraph {
     list.iter().find(|p| p.text == text).cloned().unwrap_or_default()
+}
+
+fn find_best_rich(list: &[RichParagraph], text: &str) -> RichParagraph {
+    if let Some(exact) = list.iter().find(|p| p.text == text) {
+        return exact.clone();
+    }
+    let mut best: Option<(&RichParagraph, f32)> = None;
+    for p in list {
+        let sim = string_similarity(&p.text, text);
+        if best.map_or(true, |(_, best_sim)| sim > best_sim) {
+            best = Some((p, sim));
+        }
+    }
+    best.map(|(p, _)| p.clone()).unwrap_or_default()
 }
 
 fn string_similarity(a: &str, b: &str) -> f32 {
