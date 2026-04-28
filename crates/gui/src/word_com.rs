@@ -7,7 +7,7 @@ use windows::Win32::Foundation::VARIANT_BOOL;
 use windows::Win32::System::Com::{
     CLSIDFromProgID, CoCreateInstance, CoInitializeEx, CoUninitialize,
     DISPATCH_FLAGS, DISPATCH_METHOD, DISPATCH_PROPERTYGET, DISPATCH_PROPERTYPUT,
-    DISPID_PROPERTYPUT, DISPPARAMS, EXCEPINFO, IDispatch, CLSCTX_LOCAL_SERVER,
+    DISPPARAMS, EXCEPINFO, IDispatch, CLSCTX_LOCAL_SERVER,
     COINIT_APARTMENTTHREADED,
 };
 use windows::Win32::System::Variant::{
@@ -16,6 +16,7 @@ use windows::Win32::System::Variant::{
 
 const LCID_SYSTEM_DEFAULT: u32 = 0x0800;
 const WD_FORMAT_XML_DOCUMENT: i32 = 16;
+const DISPID_PROPERTYPUT: i32 = -3;
 
 pub fn convert_doc_to_docx(src: &Path, dst: &Path) -> Result<()> {
     let src = std::fs::canonicalize(src)
@@ -197,7 +198,7 @@ impl ComObject {
             LCID_SYSTEM_DEFAULT,
             flags,
             &mut disp_params,
-            &mut result,
+            Some(&mut result),
             Some(&mut excepinfo),
             Some(&mut arg_err),
         );
