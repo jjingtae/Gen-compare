@@ -36,6 +36,12 @@ pub struct DocxContent {
 
 #[derive(Debug, Clone, Default)]
 pub struct RawParts {
+    /// Original main document XML. Used by the writer to preserve root namespaces and section properties.
+    pub document_xml: Option<Vec<u8>>,
+    /// Every part in the original DOCX package, copied verbatim by the writer.
+    /// The writer replaces only word/document.xml. This prevents Word repair errors
+    /// caused by missing content types, relationships, document properties, etc.
+    pub all_parts: Vec<(String, Vec<u8>)>,
     pub styles_xml: Option<Vec<u8>>,
     pub numbering_xml: Option<Vec<u8>>,
     pub theme1_xml: Option<Vec<u8>>,
@@ -83,14 +89,17 @@ pub fn read_document<P: AsRef<Path>>(path: P) -> Result<DocxContent> {
         .with_context(|| format!("open docx {}", path.as_ref().display()))?;
     let mut zip = zip::ZipArchive::new(file).context("parse docx as zip")?;
 
-    let body = {
-        let mut xml = String::new();
+    let document_xml_bytes = {
+        let mut buf = Vec::new();
         zip.by_name("word/document.xml")
             .context("docx missing word/document.xml")?
-            .read_to_string(&mut xml)
+            .read_to_end(&mut buf)
             .context("read document.xml")?;
-        parse_blocks(&xml)?
+        buf
     };
+    let document_xml = String::from_utf8(document_xml_bytes.clone())
+        .context("document.xml is not valid UTF-8")?;
+    let body = parse_blocks(&document_xml)?;
 
     let mut headers = Vec::new();
     let mut footers = Vec::new();
@@ -99,6 +108,17 @@ pub fn read_document<P: AsRef<Path>>(path: P) -> Result<DocxContent> {
     let mut raw_hf_rels = Vec::new();
     let mut binary_resources: Vec<(String, Vec<u8>)> = Vec::new();
     let names: Vec<String> = zip.file_names().map(|s| s.to_string()).collect();
+
+    // Preserve the entire DOCX package. The redline writer will copy all parts
+    // verbatim and replace only word/document.xml. This is much safer than
+    // reconstructing [Content_Types].xml, .rels, docProps, customXml, etc.
+    let mut all_parts: Vec<(String, Vec<u8>)> = Vec::new();
+    for name in &names {
+        if let Some(bytes) = read_bytes(&mut zip, name) {
+            all_parts.push((name.clone(), bytes));
+        }
+    }
+
     for name in &names {
         // Collect binary resources (images, embedded objects, fonts) — these
         // are referenced by header/footer rels and must exist in the output
@@ -159,6 +179,8 @@ pub fn read_document<P: AsRef<Path>>(path: P) -> Result<DocxContent> {
         .unwrap_or_default();
 
     let raw_parts = RawParts {
+        document_xml: Some(document_xml_bytes),
+        all_parts,
         styles_xml: read_bytes(&mut zip, "word/styles.xml"),
         numbering_xml: read_bytes(&mut zip, "word/numbering.xml"),
         theme1_xml: read_bytes(&mut zip, "word/theme/theme1.xml"),
