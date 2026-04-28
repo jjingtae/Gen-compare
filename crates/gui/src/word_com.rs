@@ -48,13 +48,28 @@ pub fn convert_doc_to_docx(src: &Path, dst: &Path) -> Result<()> {
                 ],
             )?;
 
-            doc.invoke_method(
+           let save_result = doc.invoke_method(
                 "SaveAs2",
                 vec![
                     VariantValue::Bstr(dst.to_string_lossy().to_string()),
                     VariantValue::I4(WD_FORMAT_XML_DOCUMENT),
                 ],
-            )?;
+            );
+
+            match save_result {
+                Ok(_) => {}
+                Err(e) if e.to_string().contains("0x80020006") => {
+                    // SaveAs2 미지원 환경 → SaveAs 폴백
+                    doc.invoke_method(
+                        "SaveAs",
+                        vec![
+                            VariantValue::Bstr(dst.to_string_lossy().to_string()),
+                            VariantValue::I4(WD_FORMAT_XML_DOCUMENT),
+                        ],
+                    )?;
+                }
+                Err(e) => return Err(e), // 다른 에러는 그대로 전파
+            }
 
             let _ = doc.invoke_method("Close", vec![VariantValue::Bool(false)]);
             let _ = word.invoke_method("Quit", vec![]);
