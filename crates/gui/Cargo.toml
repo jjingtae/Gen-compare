@@ -24,7 +24,7 @@ rayon = { workspace = true }
 lopdf = { workspace = true }
 tempfile = "3"
 
-windows = { version = "0.58", features = [
+windows = { version = "=0.52.0", features = [
   "Win32_Foundation",
   "Win32_System_Com",
   "Win32_System_Ole",
