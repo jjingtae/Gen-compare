@@ -227,18 +227,19 @@ impl VariantValue {
 
         match self {
             VariantValue::Bstr(value) => {
-                variant.Anonymous.Anonymous.vt = VT_BSTR;
-                variant.Anonymous.Anonymous.Anonymous.bstrVal =
+                // ✅ 수정: (*...) 로 ManuallyDrop 명시적 역참조
+                (*variant.Anonymous.Anonymous).vt = VT_BSTR;
+                (*variant.Anonymous.Anonymous).Anonymous.bstrVal =
                     ManuallyDrop::new(BSTR::from(value));
             }
             VariantValue::Bool(value) => {
-                variant.Anonymous.Anonymous.vt = VT_BOOL;
-                variant.Anonymous.Anonymous.Anonymous.boolVal =
+                (*variant.Anonymous.Anonymous).vt = VT_BOOL;
+                (*variant.Anonymous.Anonymous).Anonymous.boolVal =
                     VARIANT_BOOL(if value { -1 } else { 0 });
             }
             VariantValue::I4(value) => {
-                variant.Anonymous.Anonymous.vt = VT_I4;
-                variant.Anonymous.Anonymous.Anonymous.lVal = value;
+                (*variant.Anonymous.Anonymous).vt = VT_I4;
+                (*variant.Anonymous.Anonymous).Anonymous.lVal = value;
             }
         }
 
@@ -247,18 +248,21 @@ impl VariantValue {
 }
 
 unsafe fn variant_to_dispatch(mut variant: VARIANT) -> Option<ComObject> {
-    let vt = variant.Anonymous.Anonymous.vt;
+    let vt = (*variant.Anonymous.Anonymous).vt; // ✅ 수정
 
     if vt != VT_DISPATCH {
         let _ = VariantClear(&mut variant);
         return None;
     }
 
-    let dispatch = ManuallyDrop::take(&mut variant.Anonymous.Anonymous.Anonymous.pdispVal)?;
+    // ✅ 수정: ManuallyDrop::take 대상도 명시적 역참조
+    let dispatch = ManuallyDrop::take(
+        &mut (*variant.Anonymous.Anonymous).Anonymous.pdispVal
+    )?;
 
     Some(ComObject { dispatch })
 }
 
 unsafe fn variant_is_empty(variant: &VARIANT) -> bool {
-    variant.Anonymous.Anonymous.vt == VT_EMPTY
+    (*variant.Anonymous.Anonymous).vt == VT_EMPTY // ✅ 수정
 }
