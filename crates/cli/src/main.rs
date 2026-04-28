@@ -309,10 +309,29 @@ fn cmd_auto_batch(
 
     let out_root = out_dir.map(|p| p.to_path_buf()).unwrap_or_else(|| dir.join("redlines"));
 
-    let pairs: Vec<Pair> = detection.pairs.iter().enumerate().map(|(i, m)| {
-        let out = out_root.join(format!("{}_{}_redline.docx", sanitize(&m.base), i + 1));
-        Pair { old: m.old.clone(), new: m.new.clone(), out }
-    }).collect();
+let pairs: Vec<Pair> = detection.pairs.iter().map(|m| {
+    let old_name = m.old
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy();
+
+    let new_name = m.new
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy();
+
+    let out = out_root.join(format!(
+        "redline_{}_{}.docx",
+        sanitize(&old_name),
+        sanitize(&new_name)
+    ));
+
+    Pair {
+        old: m.old.clone(),
+        new: m.new.clone(),
+        out,
+    }
+}).collect();
 
     if dry_run {
         if json {

@@ -476,8 +476,6 @@ fn emit_rich_paragraph(
     }
     match op {
         ParaOp::Equal { .. } if !source.runs.is_empty() => {
-            // Emit original runs verbatim so fonts, bold, italic, color, etc.
-            // are perfectly preserved on unchanged paragraphs.
             for r in &source.runs {
                 body.push_str(r#"<w:r>"#);
                 if !r.rpr_xml.is_empty() {
@@ -489,7 +487,10 @@ fn emit_rich_paragraph(
                 ));
             }
         }
-        _ => emit_para_op(body, op, rev, opts),
+        _ => {
+            body.push_str(&del_wrap(del_run(&source.text, Some(COLOR_DELETE)), rev.next(), opts));
+            body.push_str(&ins_wrap(run(&source.text, Some(COLOR_INSERT)), rev.next(), opts));
+        }
     }
     body.push_str("</w:p>");
 }
