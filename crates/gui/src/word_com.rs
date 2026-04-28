@@ -39,7 +39,7 @@ pub fn convert_doc_to_docx(src: &Path, dst: &Path) -> Result<()> {
 
             let documents = word.get_property("Documents", vec![])?;
 
-            let doc = documents.invoke_method_object(
+            let doc = documents.invoke_method(
                 "Open",
                 vec![
                     VariantValue::Bstr(src.to_string_lossy().to_string()),
@@ -48,6 +48,7 @@ pub fn convert_doc_to_docx(src: &Path, dst: &Path) -> Result<()> {
                 ],
             )?;
 
+            // SaveAs2 시도 → 실패 시 SaveAs 폴백
             let save_result = doc.invoke_method(
                 "SaveAs2",
                 vec![
@@ -56,14 +57,18 @@ pub fn convert_doc_to_docx(src: &Path, dst: &Path) -> Result<()> {
                 ],
             );
 
-            if save_result.is_err() {
-                doc.invoke_method(
-                    "SaveAs",
-                    vec![
-                        VariantValue::Bstr(dst.to_string_lossy().to_string()),
-                        VariantValue::I4(WD_FORMAT_XML_DOCUMENT),
-                    ],
-                )?;
+            match save_result {
+                Ok(_) => {}
+                Err(e) if e.to_string().contains("0x80020006") => {
+                    doc.invoke_method(
+                        "SaveAs",
+                        vec![
+                            VariantValue::Bstr(dst.to_string_lossy().to_string()),
+                            VariantValue::I4(WD_FORMAT_XML_DOCUMENT),
+                        ],
+                    )?;
+                }
+                Err(e) => return Err(e),
             }
 
             let _ = doc.invoke_method("Close", vec![VariantValue::Bool(false)]);
@@ -153,26 +158,20 @@ impl ComObject {
     }
 
     unsafe fn put_property(&self, name: &str, args: Vec<VariantValue>) -> Result<()> {
-        let mut result = self.invoke_raw(name, DISPATCH_PROPERTYPUT, args)?;
-        let _ = VariantClear(&mut result);
+        let _ = self.invoke_raw(name, DISPATCH_PROPERTYPUT, args)?;
         Ok(())
     }
 
-    unsafe fn invoke_method(&self, name: &str, args: Vec<VariantValue>) -> Result<()> {
-        let mut result = self.invoke_raw(name, DISPATCH_METHOD, args)?;
-        let _ = VariantClear(&mut result);
-        Ok(())
-    }
-
-    unsafe fn invoke_method_object(
-        &self,
-        name: &str,
-        args: Vec<VariantValue>,
-    ) -> Result<ComObject> {
+    // ✅ 핵심 수정: 반환값이 IDispatch가 아닐 때 self 대신 에러 반환
+    unsafe fn invoke_method(&self, name: &str, args: Vec<VariantValue>) -> Result<ComObject> {
         let result = self.invoke_raw(name, DISPATCH_METHOD, args)?;
 
-        variant_to_dispatch(result)
-            .with_context(|| format!("COM 메서드 결과가 IDispatch 객체가 아닙니다: {name}"))
+        if variant_is_empty(&result) {
+            Ok(self.clone())
+        } else {
+            variant_to_dispatch(result)
+                .ok_or_else(|| anyhow::anyhow!("COM 메서드 반환값이 IDispatch가 아닙니다: {name}"))
+        }
     }
 
     unsafe fn invoke_raw(
@@ -275,4 +274,8 @@ unsafe fn variant_to_dispatch(mut variant: VARIANT) -> Option<ComObject> {
     )?;
 
     Some(ComObject { dispatch })
+}
+
+unsafe fn variant_is_empty(variant: &VARIANT) -> bool {
+    (*variant.Anonymous.Anonymous).vt == VT_EMPTY
 }
