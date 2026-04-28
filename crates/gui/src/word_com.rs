@@ -39,22 +39,33 @@ pub fn convert_doc_to_docx(src: &Path, dst: &Path) -> Result<()> {
 
             let documents = word.get_property("Documents", vec![])?;
 
-            let doc = documents.invoke_method(
+            let _ = documents.invoke_method(
                 "Open",
                 vec![
                     VariantValue::Bstr(src.to_string_lossy().to_string()),
-                    VariantValue::Bool(false),
-                    VariantValue::Bool(false),
                 ],
             )?;
 
-            doc.invoke_method(
-                "SaveAs",
+            // Open 반환값을 믿지 말고 Word의 현재 문서를 직접 잡는다.
+            let doc = word.get_property("ActiveDocument", vec![])?;
+
+            let save_result = doc.invoke_method(
+                "SaveAs2",
                 vec![
                     VariantValue::Bstr(dst.to_string_lossy().to_string()),
                     VariantValue::I4(WD_FORMAT_XML_DOCUMENT),
                 ],
-            )?;
+            );
+
+            if save_result.is_err() {
+                doc.invoke_method(
+                    "SaveAs",
+                    vec![
+                        VariantValue::Bstr(dst.to_string_lossy().to_string()),
+                        VariantValue::I4(WD_FORMAT_XML_DOCUMENT),
+                    ],
+                )?;
+            }
 
             let _ = doc.invoke_method("Close", vec![VariantValue::Bool(false)]);
             let _ = word.invoke_method("Quit", vec![]);
