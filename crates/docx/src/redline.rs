@@ -108,52 +108,70 @@ pub fn write_redline<P: AsRef<Path>>(
         let zopts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
         let parts = opts.source_parts.clone().unwrap_or_default();
+        let document_xml = build_document(ops, opts);
 
-        zip.start_file("[Content_Types].xml", zopts)?;
-        zip.write_all(content_types_for(&parts).as_bytes())?;
+        if !parts.all_parts.is_empty() {
+            // Safer DOCX strategy: copy the original package exactly and replace
+            // only word/document.xml. This preserves [Content_Types].xml, all
+            // relationships, docProps, numbering, styles, custom XML, media,
+            // headers/footers, and any vendor-specific parts that Word expects.
+            let mut wrote_document = false;
+            for (name, bytes) in &parts.all_parts {
+                let file_opts = zip_options_for_part(name, zopts);
+                zip.start_file(name, file_opts)?;
+                if name == "word/document.xml" {
+                    zip.write_all(document_xml.as_bytes())?;
+                    wrote_document = true;
+                } else {
+                    zip.write_all(bytes)?;
+                }
+            }
+            if !wrote_document {
+                zip.start_file("word/document.xml", zopts)?;
+                zip.write_all(document_xml.as_bytes())?;
+            }
+        } else {
+            // Fallback for tests or callers that did not provide source_parts.
+            // This is less faithful than package-copy mode but keeps the writer usable.
+            zip.start_file("[Content_Types].xml", zopts)?;
+            zip.write_all(content_types_for(&parts).as_bytes())?;
 
-        zip.start_file("_rels/.rels", zopts)?;
-        zip.write_all(ROOT_RELS.as_bytes())?;
+            zip.start_file("_rels/.rels", zopts)?;
+            zip.write_all(ROOT_RELS.as_bytes())?;
 
-        zip.start_file("word/_rels/document.xml.rels", zopts)?;
-        zip.write_all(doc_rels_for(&parts).as_bytes())?;
+            zip.start_file("word/_rels/document.xml.rels", zopts)?;
+            zip.write_all(doc_rels_for(&parts).as_bytes())?;
 
-        zip.start_file("word/document.xml", zopts)?;
-        zip.write_all(build_document(ops, opts).as_bytes())?;
+            zip.start_file("word/document.xml", zopts)?;
+            zip.write_all(document_xml.as_bytes())?;
 
-        // Copy preserved parts verbatim. Missing parts are harmless — style/font
-        // references simply fall back to reader defaults.
-        copy_part(&mut zip, zopts, "word/styles.xml", &parts.styles_xml)?;
-        copy_part(&mut zip, zopts, "word/numbering.xml", &parts.numbering_xml)?;
-        copy_part(&mut zip, zopts, "word/theme/theme1.xml", &parts.theme1_xml)?;
-        copy_part(&mut zip, zopts, "word/fontTable.xml", &parts.font_table_xml)?;
-        copy_part(&mut zip, zopts, "word/settings.xml", &parts.settings_xml)?;
-        copy_part(&mut zip, zopts, "word/webSettings.xml", &parts.web_settings_xml)?;
-        copy_part(&mut zip, zopts, "word/stylesWithEffects.xml", &parts.style_with_effects_xml)?;
-        copy_part(&mut zip, zopts, "word/comments.xml", &parts.comments_xml)?;
-        copy_part(&mut zip, zopts, "word/footnotes.xml", &parts.footnotes_xml)?;
-        copy_part(&mut zip, zopts, "word/endnotes.xml", &parts.endnotes_xml)?;
-        for (name, bytes) in &parts.headers {
-            zip.start_file(name, zopts)?;
-            zip.write_all(bytes)?;
-        }
-        for (name, bytes) in &parts.footers {
-            zip.start_file(name, zopts)?;
-            zip.write_all(bytes)?;
-        }
-        for (name, bytes) in &parts.header_footer_rels {
-            zip.start_file(name, zopts)?;
-            zip.write_all(bytes)?;
-        }
-        // Copy binary resources (images, embedded objects, embedded fonts)
-        // referenced by header/footer rels. Without these, Word considers
-        // the rels "dangling" and refuses to open the document as corrupted.
-        // Images/fonts must use Stored (no deflate) since they're already
-        // compressed or binary — deflating them can cause reader quirks.
-        let store_opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
-        for (name, bytes) in &parts.binary_resources {
-            zip.start_file(name, store_opts)?;
-            zip.write_all(bytes)?;
+            copy_part(&mut zip, zopts, "word/styles.xml", &parts.styles_xml)?;
+            copy_part(&mut zip, zopts, "word/numbering.xml", &parts.numbering_xml)?;
+            copy_part(&mut zip, zopts, "word/theme/theme1.xml", &parts.theme1_xml)?;
+            copy_part(&mut zip, zopts, "word/fontTable.xml", &parts.font_table_xml)?;
+            copy_part(&mut zip, zopts, "word/settings.xml", &parts.settings_xml)?;
+            copy_part(&mut zip, zopts, "word/webSettings.xml", &parts.web_settings_xml)?;
+            copy_part(&mut zip, zopts, "word/stylesWithEffects.xml", &parts.style_with_effects_xml)?;
+            copy_part(&mut zip, zopts, "word/comments.xml", &parts.comments_xml)?;
+            copy_part(&mut zip, zopts, "word/footnotes.xml", &parts.footnotes_xml)?;
+            copy_part(&mut zip, zopts, "word/endnotes.xml", &parts.endnotes_xml)?;
+            for (name, bytes) in &parts.headers {
+                zip.start_file(name, zopts)?;
+                zip.write_all(bytes)?;
+            }
+            for (name, bytes) in &parts.footers {
+                zip.start_file(name, zopts)?;
+                zip.write_all(bytes)?;
+            }
+            for (name, bytes) in &parts.header_footer_rels {
+                zip.start_file(name, zopts)?;
+                zip.write_all(bytes)?;
+            }
+            let store_opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+            for (name, bytes) in &parts.binary_resources {
+                zip.start_file(name, store_opts)?;
+                zip.write_all(bytes)?;
+            }
         }
 
         let finished = zip.finish()?;
@@ -187,6 +205,31 @@ fn tmp_sibling(final_path: &Path) -> std::path::PathBuf {
         .and_then(|s| s.to_str())
         .unwrap_or("out.docx");
     parent.join(format!(".{}.{}.tmp", name, nonce))
+}
+
+
+fn zip_options_for_part(name: &str, default_opts: SimpleFileOptions) -> SimpleFileOptions {
+    // Most DOCX parts can be deflated. Already-compressed/binary resources are
+    // safer stored as-is; this also avoids reader quirks in Word/LibreOffice.
+    let lower = name.to_ascii_lowercase();
+    let stored = lower.starts_with("word/media/")
+        || lower.starts_with("word/embeddings/")
+        || lower.starts_with("word/fonts/")
+        || lower.ends_with(".png")
+        || lower.ends_with(".jpg")
+        || lower.ends_with(".jpeg")
+        || lower.ends_with(".gif")
+        || lower.ends_with(".bmp")
+        || lower.ends_with(".tif")
+        || lower.ends_with(".tiff")
+        || lower.ends_with(".emf")
+        || lower.ends_with(".wmf")
+        || lower.ends_with(".ico");
+    if stored {
+        SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored)
+    } else {
+        default_opts
+    }
 }
 
 fn mime_for_ext(ext: &str) -> &'static str {
@@ -323,13 +366,86 @@ fn build_document(ops: &[BlockOp], opts: &RedlineOptions) -> String {
 
     body.push_str(&summary_page(&stats_of_blocks(ops), opts, &mut rev));
 
+    let original_xml = opts
+        .source_parts
+        .as_ref()
+        .and_then(|p| p.document_xml.as_deref())
+        .and_then(|b| std::str::from_utf8(b).ok());
+
+    // Preserve the original section properties when possible. Losing sectPr can
+    // change margins/page size and may trigger Word repair in stricter files.
+    if let Some(sect_pr) = original_xml.and_then(extract_last_sect_pr) {
+        body.push_str(&sect_pr);
+    }
+
+    let root_open = original_xml
+        .and_then(extract_document_root_open)
+        .unwrap_or_else(default_document_root_open);
+
     format!(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+{}
 <w:body>{}</w:body>
 </w:document>"#,
+        root_open,
         body
     )
+}
+
+fn extract_document_root_open(xml: &str) -> Option<String> {
+    let start = xml.find("<w:document")?;
+    let rest = &xml[start..];
+    let end = rest.find('>')?;
+    Some(rest[..=end].to_string())
+}
+
+fn default_document_root_open() -> String {
+    // Include common Word namespaces because preserved pPr/rPr fragments may
+    // contain w14/w15/mc/r attributes. Undeclared prefixes cause repair prompts.
+    r#"<w:document
+xmlns:wpc="http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas"
+xmlns:cx="http://schemas.microsoft.com/office/drawing/2014/chartex"
+xmlns:cx1="http://schemas.microsoft.com/office/drawing/2015/9/8/chartex"
+xmlns:cx2="http://schemas.microsoft.com/office/drawing/2015/10/21/chartex"
+xmlns:cx3="http://schemas.microsoft.com/office/drawing/2016/5/9/chartex"
+xmlns:cx4="http://schemas.microsoft.com/office/drawing/2016/5/10/chartex"
+xmlns:cx5="http://schemas.microsoft.com/office/drawing/2016/5/11/chartex"
+xmlns:cx6="http://schemas.microsoft.com/office/drawing/2016/5/12/chartex"
+xmlns:cx7="http://schemas.microsoft.com/office/drawing/2016/5/13/chartex"
+xmlns:cx8="http://schemas.microsoft.com/office/drawing/2016/5/14/chartex"
+xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+xmlns:aink="http://schemas.microsoft.com/office/drawing/2016/ink"
+xmlns:am3d="http://schemas.microsoft.com/office/drawing/2017/model3d"
+xmlns:o="urn:schemas-microsoft-com:office:office"
+xmlns:oel="http://schemas.microsoft.com/office/2019/extlst"
+xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"
+xmlns:v="urn:schemas-microsoft-com:vml"
+xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing"
+xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+xmlns:w10="urn:schemas-microsoft-com:office:word"
+xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"
+xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"
+xmlns:w16cex="http://schemas.microsoft.com/office/word/2018/wordml/cex"
+xmlns:w16cid="http://schemas.microsoft.com/office/word/2016/wordml/cid"
+xmlns:w16="http://schemas.microsoft.com/office/word/2018/wordml"
+xmlns:w16du="http://schemas.microsoft.com/office/word/2023/wordml/word16du"
+xmlns:w16sdtdh="http://schemas.microsoft.com/office/word/2020/wordml/sdtdatahash"
+xmlns:w16se="http://schemas.microsoft.com/office/word/2015/wordml/symex"
+xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup"
+xmlns:wpi="http://schemas.microsoft.com/office/word/2010/wordprocessingInk"
+xmlns:wne="http://schemas.microsoft.com/office/word/2006/wordml"
+xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+mc:Ignorable="w14 w15 w16se w16cid w16 w16cex w16sdtdh w16du wp14">"#.to_string()
+}
+
+fn extract_last_sect_pr(xml: &str) -> Option<String> {
+    let close = "</w:sectPr>";
+    let end = xml.rfind(close)? + close.len();
+    let before = &xml[..end];
+    let start = before.rfind("<w:sectPr")?;
+    Some(xml[start..end].to_string())
 }
 
 fn emit_block_op(body: &mut String, op: &BlockOp, rev: &mut RevId, opts: &RedlineOptions) {
